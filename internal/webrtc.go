@@ -102,20 +102,59 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 		return nil, err
 	}
 
+	// Track storage for muxing
+	var videoTrack *webrtc.TrackRemote
+	var audioTrack *webrtc.TrackRemote
+	var mpegTSMuxer *MPEGTSMuxer
+	var webmMuxer *WebMMuxer
+
 	// Set handlers for incoming tracks
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		codec := track.Codec()
 		DebugLog("Track received - Type: %s, Codec: %s\n", track.Kind(), codec.MimeType)
 
-		if track.Kind() == webrtc.RTPCodecTypeVideo {
-			if VideoPipe {
-				// Pipe raw video to stdout
-				go PipeRawStream(track, os.Stdout, VideoCodec)
+		if MPEGTSOutput || WebMOutput {
+			// Store tracks for muxing
+			if track.Kind() == webrtc.RTPCodecTypeVideo {
+				videoTrack = track
+			} else if track.Kind() == webrtc.RTPCodecTypeAudio {
+				audioTrack = track
+			}
+
+			// Start muxer based on configuration
+			if MPEGTSOutput {
+				if MPEGTSVideoOnly {
+					// Start muxer with video only
+					if videoTrack != nil && mpegTSMuxer == nil {
+						mpegTSMuxer = NewMPEGTSMuxer(os.Stdout, videoTrack, nil)
+						go mpegTSMuxer.Run()
+					}
+				} else {
+					// Start muxer when both tracks are available
+					if videoTrack != nil && audioTrack != nil && mpegTSMuxer == nil {
+						mpegTSMuxer = NewMPEGTSMuxer(os.Stdout, videoTrack, audioTrack)
+						go mpegTSMuxer.Run()
+					}
+				}
+			} else if WebMOutput {
+				// Start WebM muxer when video track is available (audio optional)
+				if videoTrack != nil && webmMuxer == nil {
+					webmMuxer = NewWebMMuxer(os.Stdout, videoTrack, audioTrack)
+					go webmMuxer.Run()
+				}
 			}
 		} else {
-			if AudioPipe {
-				// Pipe raw Opus to stdout
-				go PipeRawStream(track, os.Stdout, "")
+			// Original pipe behavior
+			if track.Kind() == webrtc.RTPCodecTypeVideo {
+				if VideoPipe {
+					// Pipe raw video to stdout
+					go PipeRawStream(track, os.Stdout, VideoCodec)
+				}
+			} else {
+				if AudioPipe {
+					// Pipe raw Opus to stdout
+					go PipeRawStream(track, os.Stdout, "")
+				}
 			}
 		}
 	})

@@ -14,6 +14,9 @@ var (
 	VideoCodec string
 	ListCodecs bool
 	DebugMode  bool
+	MPEGTSOutput bool
+	MPEGTSVideoOnly bool
+	WebMOutput bool
 )
 
 func init() {
@@ -23,6 +26,9 @@ func init() {
 	pflag.StringVarP(&VideoCodec, "codec", "c", "h264", "Video codec to use (h264, vp8, vp9)")
 	pflag.BoolVarP(&ListCodecs, "list-codecs", "l", false, "List codecs supported by the WHEP server")
 	pflag.BoolVarP(&DebugMode, "debug", "d", false, "Enable debug logging")
+	pflag.BoolVarP(&MPEGTSOutput, "mpegts", "m", false, "Output MPEG-TS stream with muxed audio and video to stdout")
+	pflag.BoolVarP(&MPEGTSVideoOnly, "mpegts-video-only", "", false, "Output MPEG-TS stream with video only (no audio)")
+	pflag.BoolVarP(&WebMOutput, "webm", "w", false, "Output WebM/Matroska stream with muxed audio and video to stdout")
 }
 
 func SetupUsage() {
@@ -33,6 +39,7 @@ func SetupUsage() {
 		fmt.Fprintf(os.Stderr, "Examples:\n")
 		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --video-pipe | ffplay -i -\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --audio-pipe | ffplay -i -\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --mpegts | ffplay -f mpegts -i -\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --list-codecs\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		pflag.PrintDefaults()

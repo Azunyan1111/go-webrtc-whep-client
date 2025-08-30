@@ -23,6 +23,9 @@ go build -o go-webrtc-whep-client main.go
 # Play audio stream with ffplay
 ./go-webrtc-whep-client -u http://example.com/whep --audio-pipe | ffplay -i -
 
+# Play MPEG-TS stream with muxed audio and video
+./go-webrtc-whep-client -u http://example.com/whep --mpegts | ffplay -f mpegts -i -
+
 # Play Cloudflare Stream video
 ./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play --video-pipe | ffplay -i -
 
@@ -35,6 +38,7 @@ go build -o go-webrtc-whep-client main.go
 - `-u, --url`: WHEP server URL (default: http://localhost:8080/whep)
 - `-v, --video-pipe`: Output video to stdout
 - `-a, --audio-pipe`: Output audio to stdout
+- `-m, --mpegts`: Output MPEG-TS stream with muxed audio and video to stdout
 - `-c, --codec`: Video codec (h264/vp8/vp9, default: h264)
 - `-l, --list-codecs`: List server codecs
 - `-d, --debug`: Show debug logs
@@ -76,6 +80,9 @@ go build -o go-webrtc-whep-client main.go
 # オーディオストリームをffplayで再生
 ./go-webrtc-whep-client -u http://example.com/whep --audio-pipe | ffplay -i -
 
+# MPEG-TSストリームで音声・映像を同時再生
+./go-webrtc-whep-client -u http://example.com/whep --mpegts | ffplay -f mpegts -i -
+
 # Cloudflare Streamのビデオを再生
 ./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play --video-pipe | ffplay -i -
 
@@ -88,6 +95,7 @@ go build -o go-webrtc-whep-client main.go
 - `-u, --url`: WHEPサーバーURL (デフォルト: http://localhost:8080/whep)
 - `-v, --video-pipe`: ビデオをstdoutに出力
 - `-a, --audio-pipe`: オーディオをstdoutに出力
+- `-m, --mpegts`: MPEG-TSストリームで音声・映像を多重化してstdoutに出力
 - `-c, --codec`: ビデオコーデック (h264/vp8/vp9、デフォルト: h264)
 - `-l, --list-codecs`: サーバーのコーデック一覧表示
 - `-d, --debug`: デバッグログ表示

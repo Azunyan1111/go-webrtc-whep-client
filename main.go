@@ -30,8 +30,24 @@ func main() {
 
 func run() error {
 	// Validate pipe options
-	if internal.VideoPipe && internal.AudioPipe {
-		return fmt.Errorf("cannot pipe both video and audio to stdout simultaneously")
+	pipeCount := 0
+	if internal.VideoPipe {
+		pipeCount++
+	}
+	if internal.AudioPipe {
+		pipeCount++
+	}
+	if internal.MPEGTSOutput {
+		pipeCount++
+	}
+	if internal.MPEGTSVideoOnly {
+		pipeCount++
+	}
+	if internal.WebMOutput {
+		pipeCount++
+	}
+	if pipeCount > 1 {
+		return fmt.Errorf("cannot use multiple output options simultaneously")
 	}
 
 	fmt.Fprintf(os.Stderr, "Connecting to WHEP server: %s\n", internal.WhepURL)
@@ -67,6 +83,18 @@ func run() error {
 
 	if internal.AudioPipe {
 		fmt.Fprintln(os.Stderr, "Piping raw Opus audio to stdout")
+	}
+	
+	if internal.MPEGTSOutput {
+		fmt.Fprintln(os.Stderr, "Piping MPEG-TS stream with muxed audio/video to stdout")
+	}
+	
+	if internal.MPEGTSVideoOnly {
+		fmt.Fprintln(os.Stderr, "Piping MPEG-TS stream with video only to stdout")
+	}
+	
+	if internal.WebMOutput {
+		fmt.Fprintln(os.Stderr, "Piping WebM stream with muxed audio/video to stdout")
 	}
 
 	fmt.Fprintln(os.Stderr, "Press Ctrl+C to stop")
