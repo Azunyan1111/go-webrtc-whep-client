@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
@@ -112,7 +113,7 @@ func run() error {
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
 		},
-		PayloadType: 97,
+		PayloadType: 111,
 	}, webrtc.RTPCodecTypeAudio); err != nil {
 		return err
 	}
@@ -210,6 +211,7 @@ func run() error {
 
 	// Send offer to WHEP server
 	fmt.Fprintln(os.Stderr, "Sending offer to WHEP server...")
+	fmt.Fprintf(os.Stderr, "\n=== SDP Offer ===\n%s\n=== End Offer ===\n\n", peerConnection.LocalDescription().SDP)
 
 	// Create HTTP request
 	req, err := http.NewRequest("POST", whepURL, bytes.NewReader([]byte(peerConnection.LocalDescription().SDP)))
@@ -248,6 +250,7 @@ func run() error {
 		return err
 	}
 
+	fmt.Fprintf(os.Stderr, "\n=== SDP Answer ===\n%s\n=== End Answer ===\n\n", string(answer))
 	fmt.Fprintln(os.Stderr, "Connected to WHEP server, receiving media...")
 
 	if videoPipe {
@@ -421,6 +424,13 @@ func pipeRawStream(track *webrtc.TrackRemote, w io.Writer, codecType string) {
 	// Buffer for accumulating NAL units
 	var nalBuffer []byte
 
+	// For VP8/VP9 IVF output
+	var ivfHeaderWritten bool
+	var frameCount uint32
+	var firstTimestamp uint32
+	var currentFrame []byte
+	var seenKeyFrame bool
+
 	for {
 		rtpPacket, _, err := track.ReadRTP()
 		if err != nil {
@@ -502,13 +512,197 @@ func pipeRawStream(track *webrtc.TrackRemote, w io.Writer, codecType string) {
 						nalBuffer = nil
 					}
 				}
-			case "vp8", "vp9":
-				// VP8/VP9 uses IVF format when piping
-				// Write raw RTP payload data for VP8/VP9
-				// The payload is already the VP8/VP9 frame data
-				if _, err := w.Write(payload); err != nil {
-					fmt.Fprintf(os.Stderr, "Error writing VP8/VP9 payload: %v\n", err)
-					return
+			case "vp8":
+				// Write IVF header on first packet
+				if !ivfHeaderWritten {
+					header := make([]byte, 32)
+					copy(header[0:], "DKIF")                        // Signature
+					binary.LittleEndian.PutUint16(header[4:], 0)    // Version
+					binary.LittleEndian.PutUint16(header[6:], 32)   // Header size
+					copy(header[8:], "VP80")                        // FourCC
+					binary.LittleEndian.PutUint16(header[12:], 640) // Width
+					binary.LittleEndian.PutUint16(header[14:], 480) // Height
+					binary.LittleEndian.PutUint32(header[16:], 30)  // Framerate denominator
+					binary.LittleEndian.PutUint32(header[20:], 1)   // Framerate numerator
+					binary.LittleEndian.PutUint32(header[24:], 0)   // Frame count (placeholder)
+					binary.LittleEndian.PutUint32(header[28:], 0)   // Unused
+
+					if _, err := w.Write(header); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing IVF header: %v\n", err)
+						return
+					}
+					ivfHeaderWritten = true
+					firstTimestamp = rtpPacket.Timestamp
+				}
+
+				// Parse VP8 payload
+				if len(payload) < 1 {
+					continue
+				}
+
+				// VP8 payload descriptor
+				var vp8Header int
+				headerSize := 1
+
+				// X bit check
+				if payload[0]&0x80 != 0 {
+					headerSize++
+					if len(payload) < headerSize {
+						continue
+					}
+					vp8Header = 1
+				}
+
+				// Check S bit for start of partition
+				isStart := (payload[0] & 0x10) != 0
+
+				// Skip VP8 payload descriptor
+				if len(payload) <= vp8Header {
+					continue
+				}
+
+				payloadData := payload[headerSize:]
+
+				// For VP8, check if this is a keyframe
+				if isStart && len(payloadData) >= 3 {
+					// VP8 bitstream - check P bit in first byte
+					isKeyFrame := (payloadData[0] & 0x01) == 0
+					if !seenKeyFrame && !isKeyFrame {
+						continue
+					}
+					seenKeyFrame = true
+				}
+
+				// Accumulate frame data
+				if isStart {
+					currentFrame = nil
+				}
+				currentFrame = append(currentFrame, payloadData...)
+
+				// Write frame when marker bit is set
+				if rtpPacket.Marker && len(currentFrame) > 0 {
+					// Write IVF frame header
+					frameHeader := make([]byte, 12)
+					binary.LittleEndian.PutUint32(frameHeader[0:], uint32(len(currentFrame)))
+					// Calculate timestamp
+					timestamp := (rtpPacket.Timestamp - firstTimestamp) / 90 // Convert from 90kHz to milliseconds
+					binary.LittleEndian.PutUint64(frameHeader[4:], uint64(timestamp))
+
+					if _, err := w.Write(frameHeader); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing IVF frame header: %v\n", err)
+						return
+					}
+
+					if _, err := w.Write(currentFrame); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing VP8 frame: %v\n", err)
+						return
+					}
+
+					frameCount++
+					currentFrame = nil
+				}
+			case "vp9":
+				// Write IVF header on first packet
+				if !ivfHeaderWritten {
+					header := make([]byte, 32)
+					copy(header[0:], "DKIF")                        // Signature
+					binary.LittleEndian.PutUint16(header[4:], 0)    // Version
+					binary.LittleEndian.PutUint16(header[6:], 32)   // Header size
+					copy(header[8:], "VP90")                        // FourCC
+					binary.LittleEndian.PutUint16(header[12:], 640) // Width
+					binary.LittleEndian.PutUint16(header[14:], 480) // Height
+					binary.LittleEndian.PutUint32(header[16:], 30)  // Framerate denominator
+					binary.LittleEndian.PutUint32(header[20:], 1)   // Framerate numerator
+					binary.LittleEndian.PutUint32(header[24:], 0)   // Frame count (placeholder)
+					binary.LittleEndian.PutUint32(header[28:], 0)   // Unused
+
+					if _, err := w.Write(header); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing IVF header: %v\n", err)
+						return
+					}
+					ivfHeaderWritten = true
+					firstTimestamp = rtpPacket.Timestamp
+				}
+
+				// Parse VP9 payload
+				if len(payload) < 1 {
+					continue
+				}
+
+				// VP9 payload descriptor
+				headerSize := 1
+
+				// I bit check (extended picture ID)
+				if payload[0]&0x80 != 0 {
+					headerSize++
+					if len(payload) < headerSize {
+						continue
+					}
+					// M bit check (extended picture ID is 2 bytes)
+					if payload[1]&0x80 != 0 {
+						headerSize++
+					}
+				}
+
+				// L bit check (TID/SLID present)
+				if payload[0]&0x40 != 0 {
+					headerSize++
+				}
+
+				// Check if we have flexible mode
+				if payload[0]&0x10 != 0 {
+					// F=1, flexible mode
+					headerSize++ // For TID/U/SID/D
+				}
+
+				if len(payload) < headerSize {
+					continue
+				}
+
+				// B bit - beginning of frame
+				isStart := (payload[0] & 0x08) != 0
+				// E bit - end of frame
+				isEnd := (payload[0] & 0x04) != 0
+				// P bit - inter-picture predicted frame
+				isInterFrame := (payload[0] & 0x01) != 0
+
+				// Skip VP9 payload descriptor
+				payloadData := payload[headerSize:]
+
+				// Check if keyframe
+				if isStart && !isInterFrame {
+					seenKeyFrame = true
+				} else if !seenKeyFrame {
+					continue
+				}
+
+				// Accumulate frame data
+				if isStart {
+					currentFrame = nil
+				}
+				currentFrame = append(currentFrame, payloadData...)
+
+				// Write frame when we have end bit or marker
+				if (isEnd || rtpPacket.Marker) && len(currentFrame) > 0 {
+					// Write IVF frame header
+					frameHeader := make([]byte, 12)
+					binary.LittleEndian.PutUint32(frameHeader[0:], uint32(len(currentFrame)))
+					// Calculate timestamp
+					timestamp := (rtpPacket.Timestamp - firstTimestamp) / 90 // Convert from 90kHz to milliseconds
+					binary.LittleEndian.PutUint64(frameHeader[4:], uint64(timestamp))
+
+					if _, err := w.Write(frameHeader); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing IVF frame header: %v\n", err)
+						return
+					}
+
+					if _, err := w.Write(currentFrame); err != nil {
+						fmt.Fprintf(os.Stderr, "Error writing VP9 frame: %v\n", err)
+						return
+					}
+
+					frameCount++
+					currentFrame = nil
 				}
 			default:
 				// For other codecs, write raw payload
