@@ -137,10 +137,16 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 					}
 				}
 			} else if WebMOutput {
-				// Start WebM muxer when video track is available (audio optional)
-				if videoTrack != nil && webmMuxer == nil {
+				// Start WebM muxer when both video and audio tracks are available
+				// This ensures audio is properly included
+				if videoTrack != nil && audioTrack != nil && webmMuxer == nil {
 					webmMuxer = NewWebMMuxer(os.Stdout, videoTrack, audioTrack)
-					go webmMuxer.Run()
+					go func() {
+						if err := webmMuxer.Run(); err != nil {
+							fmt.Fprintf(os.Stderr, "WebM muxer error: %v\n", err)
+							os.Exit(1)
+						}
+					}()
 				}
 			}
 		} else {

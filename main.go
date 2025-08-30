@@ -84,15 +84,15 @@ func run() error {
 	if internal.AudioPipe {
 		fmt.Fprintln(os.Stderr, "Piping raw Opus audio to stdout")
 	}
-	
+
 	if internal.MPEGTSOutput {
 		fmt.Fprintln(os.Stderr, "Piping MPEG-TS stream with muxed audio/video to stdout")
 	}
-	
+
 	if internal.MPEGTSVideoOnly {
 		fmt.Fprintln(os.Stderr, "Piping MPEG-TS stream with video only to stdout")
 	}
-	
+
 	if internal.WebMOutput {
 		fmt.Fprintln(os.Stderr, "Piping WebM stream with muxed audio/video to stdout")
 	}

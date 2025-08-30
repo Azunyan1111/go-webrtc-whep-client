@@ -47,7 +47,7 @@ func PipeRawStream(track *webrtc.TrackRemote, w io.Writer, codecType string) {
 			case "h264":
 				handleH264Packet(payload, &nalBuffer, w)
 			case "vp8":
-				handleVP8Packet(payload, rtpPacket, &ivfHeaderWritten, &firstTimestamp, 
+				handleVP8Packet(payload, rtpPacket, &ivfHeaderWritten, &firstTimestamp,
 					&currentFrame, &seenKeyFrame, &frameCount, w)
 			case "vp9":
 				handleVP9Packet(payload, rtpPacket, &ivfHeaderWritten, &firstTimestamp,
@@ -128,9 +128,9 @@ func handleH264Packet(payload []byte, nalBuffer *[]byte, w io.Writer) {
 	}
 }
 
-func handleVP8Packet(payload []byte, rtpPacket *rtp.Packet, ivfHeaderWritten *bool, 
+func handleVP8Packet(payload []byte, rtpPacket *rtp.Packet, ivfHeaderWritten *bool,
 	firstTimestamp *uint32, currentFrame *[]byte, seenKeyFrame *bool, frameCount *uint32, w io.Writer) {
-	
+
 	// Write IVF header on first packet
 	if !*ivfHeaderWritten {
 		if err := WriteIVFHeader(w, "VP80"); err != nil {
@@ -211,7 +211,7 @@ func handleVP8Packet(payload []byte, rtpPacket *rtp.Packet, ivfHeaderWritten *bo
 
 func handleVP9Packet(payload []byte, rtpPacket *rtp.Packet, ivfHeaderWritten *bool,
 	firstTimestamp *uint32, currentFrame *[]byte, seenKeyFrame *bool, frameCount *uint32, w io.Writer) {
-	
+
 	// Write IVF header on first packet
 	if !*ivfHeaderWritten {
 		if err := WriteIVFHeader(w, "VP90"); err != nil {
@@ -306,7 +306,7 @@ func handleVP9Packet(payload []byte, rtpPacket *rtp.Packet, ivfHeaderWritten *bo
 
 func handleOpusPacket(payload []byte, oggHeaderWritten *bool, granulePosition *uint64,
 	pageSequence *uint32, serialNumber uint32, w io.Writer) {
-	
+
 	if !*oggHeaderWritten {
 		// Write OggOpus headers
 		seq, err := WriteOggOpusHeader(w, serialNumber)

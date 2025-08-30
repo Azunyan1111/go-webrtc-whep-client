@@ -8,15 +8,15 @@ import (
 )
 
 var (
-	WhepURL    string
-	VideoPipe  bool
-	AudioPipe  bool
-	VideoCodec string
-	ListCodecs bool
-	DebugMode  bool
-	MPEGTSOutput bool
+	WhepURL         string
+	VideoPipe       bool
+	AudioPipe       bool
+	VideoCodec      string
+	ListCodecs      bool
+	DebugMode       bool
+	MPEGTSOutput    bool
 	MPEGTSVideoOnly bool
-	WebMOutput bool
+	WebMOutput      bool
 )
 
 func init() {
