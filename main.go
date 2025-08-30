@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
-	"flag"
 	"fmt"
+	"github.com/pion/interceptor"
+	"github.com/pion/webrtc/v4"
+	"github.com/spf13/pflag"
 	"io"
 	"log"
 	"net/http"
@@ -12,35 +14,26 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/pion/interceptor"
-	"github.com/pion/webrtc/v4"
 )
 
 var (
-	whepURL     string
-	bearerToken string
-	videoPipe   bool
-	audioPipe   bool
-	videoCodec  string
-	listCodecs  bool
+	whepURL    string
+	videoPipe  bool
+	audioPipe  bool
+	videoCodec string
+	listCodecs bool
 )
 
 func init() {
-	flag.StringVar(&whepURL, "url", "http://localhost:8080/whep", "WHEP server URL")
-	flag.StringVar(&whepURL, "u", "http://localhost:8080/whep", "WHEP server URL (shorthand)")
-	flag.StringVar(&bearerToken, "token", "", "Bearer token for authentication (optional)")
-	flag.StringVar(&bearerToken, "t", "", "Bearer token for authentication (shorthand)")
-	flag.BoolVar(&videoPipe, "video-pipe", false, "Output raw video stream to stdout (for piping to ffmpeg)")
-	flag.BoolVar(&audioPipe, "audio-pipe", false, "Output raw Opus stream to stdout (for piping to ffmpeg)")
-	flag.StringVar(&videoCodec, "codec", "h264", "Video codec to use (h264, vp8, vp9)")
-	flag.StringVar(&videoCodec, "c", "h264", "Video codec to use (shorthand)")
-	flag.BoolVar(&listCodecs, "list-codecs", false, "List codecs supported by the WHEP server")
-	flag.BoolVar(&listCodecs, "ls", false, "List codecs supported by the WHEP server (shorthand)")
+	pflag.StringVarP(&whepURL, "url", "u", "http://localhost:8080/whep", "WHEP server URL")
+	pflag.BoolVarP(&videoPipe, "video-pipe", "v", false, "Output raw video stream to stdout (for piping to ffmpeg)")
+	pflag.BoolVarP(&audioPipe, "audio-pipe", "a", false, "Output raw Opus stream to stdout (for piping to ffmpeg)")
+	pflag.StringVarP(&videoCodec, "codec", "c", "h264", "Video codec to use (h264, vp8, vp9)")
+	pflag.BoolVarP(&listCodecs, "list-codecs", "l", false, "List codecs supported by the WHEP server")
 }
 
 func main() {
-	flag.Usage = func() {
+	pflag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "WHEP Native Client - Receive WebRTC streams via WHEP protocol\n\n")
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
@@ -49,10 +42,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --audio-pipe | ffmpeg -i - -c copy output.mp3\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --list-codecs\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Flags:\n")
-		flag.PrintDefaults()
+		pflag.PrintDefaults()
 	}
 
-	flag.Parse()
+	pflag.Parse()
 
 	if listCodecs {
 		if err := listServerCodecs(); err != nil {
@@ -78,9 +71,6 @@ func run() error {
 
 	fmt.Fprintf(os.Stderr, "Connecting to WHEP server: %s\n", whepURL)
 	fmt.Fprintf(os.Stderr, "Using video codec: %s\n", videoCodec)
-	if bearerToken != "" {
-		fmt.Fprintln(os.Stderr, "Using bearer token authentication")
-	}
 
 	// Create a MediaEngine object to configure the supported codec
 	mediaEngine := &webrtc.MediaEngine{}
@@ -101,7 +91,7 @@ func run() error {
 			RTPCodecCapability: webrtc.RTPCodecCapability{
 				MimeType: webrtc.MimeTypeVP8, ClockRate: 90000,
 			},
-			PayloadType: 96,
+			PayloadType: 97,
 		}, webrtc.RTPCodecTypeVideo); err != nil {
 			return err
 		}
@@ -110,7 +100,7 @@ func run() error {
 			RTPCodecCapability: webrtc.RTPCodecCapability{
 				MimeType: webrtc.MimeTypeVP9, ClockRate: 90000,
 			},
-			PayloadType: 96,
+			PayloadType: 98,
 		}, webrtc.RTPCodecTypeVideo); err != nil {
 			return err
 		}
@@ -229,9 +219,6 @@ func run() error {
 
 	// Set headers
 	req.Header.Set("Content-Type", "application/sdp")
-	if bearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+bearerToken)
-	}
 
 	// Send request
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -375,9 +362,6 @@ func listServerCodecs() error {
 	}
 
 	req.Header.Set("Content-Type", "application/sdp")
-	if bearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+bearerToken)
-	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
