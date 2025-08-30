@@ -3,7 +3,6 @@ module github.com/Azunyan1111/go-webrtc-whep-client
 go 1.24.2
 
 require (
-	github.com/Comcast/gots/v2 v2.2.1
 	github.com/pion/interceptor v0.1.40
 	github.com/pion/rtp v1.8.21
 	github.com/pion/webrtc/v4 v4.1.4
