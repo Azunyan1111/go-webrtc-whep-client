@@ -1,6 +1,6 @@
 # go-webrtc-whep-client
 
-A Go client that receives WebRTC streams via WHEP protocol and pipes them to ffmpeg
+A Go client that receives WebRTC streams via WHEP protocol and pipes them to ffplay for playback verification. Compatible with Cloudflare Stream and other WHEP-compliant servers.
 
 ## Installation
 
@@ -17,11 +17,14 @@ go build -o go-webrtc-whep-client main.go
 ## Usage
 
 ```bash
-# Save video to MP4
-./go-webrtc-whep-client -u http://example.com/whep --video-pipe | ffmpeg -i - -c copy output.mp4
+# Play video stream with ffplay
+./go-webrtc-whep-client -u http://example.com/whep --video-pipe | ffplay -i -
 
-# Save audio to MP3
-./go-webrtc-whep-client -u http://example.com/whep --audio-pipe | ffmpeg -i - -c copy output.mp3
+# Play audio stream with ffplay
+./go-webrtc-whep-client -u http://example.com/whep --audio-pipe | ffplay -i -
+
+# Play Cloudflare Stream video
+./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play --video-pipe | ffplay -i -
 
 # Check server codecs
 ./go-webrtc-whep-client -u http://example.com/whep --list-codecs
@@ -36,6 +39,12 @@ go build -o go-webrtc-whep-client main.go
 - `-l, --list-codecs`: List server codecs
 - `-d, --debug`: Show debug logs
 
+## Compatibility
+
+This client is compatible with:
+- Cloudflare Stream WebRTC playback (https://developers.cloudflare.com/stream/webrtc-beta/)
+- Any WHEP-compliant streaming server
+
 ## License
 
 MIT
@@ -44,7 +53,7 @@ MIT
 
 # go-webrtc-whep-client
 
-WHEPプロトコルでWebRTCストリームを受信し、ffmpegにパイプできるGoクライアント
+WHEPプロトコルでWebRTCストリームを受信し、ffplayにパイプして再生確認ができるGoクライアント。Cloudflare Streamなどの WHEP対応サーバーで使用可能。
 
 ## インストール
 
@@ -61,11 +70,14 @@ go build -o go-webrtc-whep-client main.go
 ## 使い方
 
 ```bash
-# ビデオをMP4に保存
-./go-webrtc-whep-client -u http://example.com/whep --video-pipe | ffmpeg -i - -c copy output.mp4
+# ビデオストリームをffplayで再生
+./go-webrtc-whep-client -u http://example.com/whep --video-pipe | ffplay -i -
 
-# オーディオをMP3に保存
-./go-webrtc-whep-client -u http://example.com/whep --audio-pipe | ffmpeg -i - -c copy output.mp3
+# オーディオストリームをffplayで再生
+./go-webrtc-whep-client -u http://example.com/whep --audio-pipe | ffplay -i -
+
+# Cloudflare Streamのビデオを再生
+./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play --video-pipe | ffplay -i -
 
 # サーバーのコーデック確認
 ./go-webrtc-whep-client -u http://example.com/whep --list-codecs
@@ -79,6 +91,12 @@ go build -o go-webrtc-whep-client main.go
 - `-c, --codec`: ビデオコーデック (h264/vp8/vp9、デフォルト: h264)
 - `-l, --list-codecs`: サーバーのコーデック一覧表示
 - `-d, --debug`: デバッグログ表示
+
+## 対応サービス
+
+このクライアントは以下のサービスに対応:
+- Cloudflare Stream WebRTC再生 (https://developers.cloudflare.com/stream/webrtc-beta/)
+- WHEP準拠のストリーミングサーバー
 
 ## ライセンス
 

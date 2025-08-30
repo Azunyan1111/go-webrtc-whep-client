@@ -35,8 +35,8 @@ var (
 
 func init() {
 	pflag.StringVarP(&whepURL, "url", "u", "http://localhost:8080/whep", "WHEP server URL")
-	pflag.BoolVarP(&videoPipe, "video-pipe", "v", false, "Output raw video stream to stdout (for piping to ffmpeg)")
-	pflag.BoolVarP(&audioPipe, "audio-pipe", "a", false, "Output raw Opus stream to stdout (for piping to ffmpeg)")
+	pflag.BoolVarP(&videoPipe, "video-pipe", "v", false, "Output raw video stream to stdout (for piping to ffplay)")
+	pflag.BoolVarP(&audioPipe, "audio-pipe", "a", false, "Output raw Opus stream to stdout (for piping to ffplay)")
 	pflag.StringVarP(&videoCodec, "codec", "c", "h264", "Video codec to use (h264, vp8, vp9)")
 	pflag.BoolVarP(&listCodecs, "list-codecs", "l", false, "List codecs supported by the WHEP server")
 	pflag.BoolVarP(&debugMode, "debug", "d", false, "Enable debug logging")
@@ -48,8 +48,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Examples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --video-pipe | ffmpeg -i - -c copy output.mp4\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --audio-pipe | ffmpeg -i - -c copy output.mp3\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --video-pipe | ffplay -i -\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --audio-pipe | ffplay -i -\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --list-codecs\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		pflag.PrintDefaults()
@@ -452,7 +452,7 @@ func listServerCodecs() error {
 	return nil
 }
 
-// pipeRawStream pipes raw codec data to a writer (typically stdout for ffmpeg)
+// pipeRawStream pipes raw codec data to a writer (typically stdout for ffplay)
 func pipeRawStream(track *webrtc.TrackRemote, w io.Writer, codecType string) {
 	// Buffer for accumulating NAL units
 	var nalBuffer []byte
