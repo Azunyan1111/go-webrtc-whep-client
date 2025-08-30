@@ -17,12 +17,20 @@ import (
 	"time"
 )
 
+// debugLog prints debug messages only when debug mode is enabled
+func debugLog(format string, v ...interface{}) {
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "[DEBUG] "+format, v...)
+	}
+}
+
 var (
 	whepURL    string
 	videoPipe  bool
 	audioPipe  bool
 	videoCodec string
 	listCodecs bool
+	debugMode  bool
 )
 
 func init() {
@@ -31,6 +39,7 @@ func init() {
 	pflag.BoolVarP(&audioPipe, "audio-pipe", "a", false, "Output raw Opus stream to stdout (for piping to ffmpeg)")
 	pflag.StringVarP(&videoCodec, "codec", "c", "h264", "Video codec to use (h264, vp8, vp9)")
 	pflag.BoolVarP(&listCodecs, "list-codecs", "l", false, "List codecs supported by the WHEP server")
+	pflag.BoolVarP(&debugMode, "debug", "d", false, "Enable debug logging")
 }
 
 func main() {
@@ -167,7 +176,7 @@ func run() error {
 	// Set handlers for incoming tracks
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		codec := track.Codec()
-		fmt.Fprintf(os.Stderr, "Track received - Type: %s, Codec: %s\n", track.Kind(), codec.MimeType)
+		debugLog("Track received - Type: %s, Codec: %s\n", track.Kind(), codec.MimeType)
 
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
 			if videoPipe {
@@ -184,7 +193,7 @@ func run() error {
 
 	// Set ICE connection state handler
 	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
-		fmt.Fprintf(os.Stderr, "ICE Connection State has changed: %s\n", connectionState.String())
+		debugLog("ICE Connection State has changed: %s\n", connectionState.String())
 		if connectionState == webrtc.ICEConnectionStateFailed {
 			fmt.Fprintln(os.Stderr, "ICE Connection Failed")
 			os.Exit(1)
@@ -211,7 +220,9 @@ func run() error {
 
 	// Send offer to WHEP server
 	fmt.Fprintln(os.Stderr, "Sending offer to WHEP server...")
-	fmt.Fprintf(os.Stderr, "\n=== SDP Offer ===\n%s\n=== End Offer ===\n\n", peerConnection.LocalDescription().SDP)
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "\n=== SDP Offer ===\n%s\n=== End Offer ===\n\n", peerConnection.LocalDescription().SDP)
+	}
 
 	// Create HTTP request
 	req, err := http.NewRequest("POST", whepURL, bytes.NewReader([]byte(peerConnection.LocalDescription().SDP)))
@@ -250,7 +261,9 @@ func run() error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stderr, "\n=== SDP Answer ===\n%s\n=== End Answer ===\n\n", string(answer))
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "\n=== SDP Answer ===\n%s\n=== End Answer ===\n\n", string(answer))
+	}
 	fmt.Fprintln(os.Stderr, "Connected to WHEP server, receiving media...")
 
 	if videoPipe {
@@ -269,6 +282,26 @@ func run() error {
 	<-sigChan
 
 	fmt.Fprintln(os.Stderr, "Closing...")
+	return nil
+}
+
+// writeIVFHeader writes the IVF container header for VP8/VP9 codecs
+func writeIVFHeader(w io.Writer, fourCC string) error {
+	header := make([]byte, 32)
+	copy(header[0:], "DKIF")                        // Signature
+	binary.LittleEndian.PutUint16(header[4:], 0)    // Version
+	binary.LittleEndian.PutUint16(header[6:], 32)   // Header size
+	copy(header[8:], fourCC)                        // FourCC (VP80 or VP90)
+	binary.LittleEndian.PutUint16(header[12:], 640) // Width
+	binary.LittleEndian.PutUint16(header[14:], 480) // Height
+	binary.LittleEndian.PutUint32(header[16:], 30)  // Framerate denominator
+	binary.LittleEndian.PutUint32(header[20:], 1)   // Framerate numerator
+	binary.LittleEndian.PutUint32(header[24:], 0)   // Frame count (placeholder)
+	binary.LittleEndian.PutUint32(header[28:], 0)   // Unused
+
+	if _, err := w.Write(header); err != nil {
+		return fmt.Errorf("error writing IVF header: %v", err)
+	}
 	return nil
 }
 
@@ -515,20 +548,8 @@ func pipeRawStream(track *webrtc.TrackRemote, w io.Writer, codecType string) {
 			case "vp8":
 				// Write IVF header on first packet
 				if !ivfHeaderWritten {
-					header := make([]byte, 32)
-					copy(header[0:], "DKIF")                        // Signature
-					binary.LittleEndian.PutUint16(header[4:], 0)    // Version
-					binary.LittleEndian.PutUint16(header[6:], 32)   // Header size
-					copy(header[8:], "VP80")                        // FourCC
-					binary.LittleEndian.PutUint16(header[12:], 640) // Width
-					binary.LittleEndian.PutUint16(header[14:], 480) // Height
-					binary.LittleEndian.PutUint32(header[16:], 30)  // Framerate denominator
-					binary.LittleEndian.PutUint32(header[20:], 1)   // Framerate numerator
-					binary.LittleEndian.PutUint32(header[24:], 0)   // Frame count (placeholder)
-					binary.LittleEndian.PutUint32(header[28:], 0)   // Unused
-
-					if _, err := w.Write(header); err != nil {
-						fmt.Fprintf(os.Stderr, "Error writing IVF header: %v\n", err)
+					if err := writeIVFHeader(w, "VP80"); err != nil {
+						fmt.Fprintf(os.Stderr, "%v\n", err)
 						return
 					}
 					ivfHeaderWritten = true
@@ -604,20 +625,8 @@ func pipeRawStream(track *webrtc.TrackRemote, w io.Writer, codecType string) {
 			case "vp9":
 				// Write IVF header on first packet
 				if !ivfHeaderWritten {
-					header := make([]byte, 32)
-					copy(header[0:], "DKIF")                        // Signature
-					binary.LittleEndian.PutUint16(header[4:], 0)    // Version
-					binary.LittleEndian.PutUint16(header[6:], 32)   // Header size
-					copy(header[8:], "VP90")                        // FourCC
-					binary.LittleEndian.PutUint16(header[12:], 640) // Width
-					binary.LittleEndian.PutUint16(header[14:], 480) // Height
-					binary.LittleEndian.PutUint32(header[16:], 30)  // Framerate denominator
-					binary.LittleEndian.PutUint32(header[20:], 1)   // Framerate numerator
-					binary.LittleEndian.PutUint32(header[24:], 0)   // Frame count (placeholder)
-					binary.LittleEndian.PutUint32(header[28:], 0)   // Unused
-
-					if _, err := w.Write(header); err != nil {
-						fmt.Fprintf(os.Stderr, "Error writing IVF header: %v\n", err)
+					if err := writeIVFHeader(w, "VP90"); err != nil {
+						fmt.Fprintf(os.Stderr, "%v\n", err)
 						return
 					}
 					ivfHeaderWritten = true
