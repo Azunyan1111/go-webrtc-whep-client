@@ -15,33 +15,28 @@ import (
 
 	"github.com/pion/interceptor"
 	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
-	"github.com/pion/webrtc/v4/pkg/media/ivfwriter"
-	"github.com/pion/webrtc/v4/pkg/media/oggwriter"
 )
 
 var (
 	whepURL     string
-	videoOutput string
-	audioOutput string
 	bearerToken string
 	videoPipe   bool
 	audioPipe   bool
-	rtpDump     bool
+	videoCodec  string
+	listCodecs  bool
 )
 
 func init() {
 	flag.StringVar(&whepURL, "url", "http://localhost:8080/whep", "WHEP server URL")
 	flag.StringVar(&whepURL, "u", "http://localhost:8080/whep", "WHEP server URL (shorthand)")
-	flag.StringVar(&videoOutput, "video", "output.ivf", "Output video file path (use '-' for stdout)")
-	flag.StringVar(&videoOutput, "v", "output.ivf", "Output video file path (shorthand)")
-	flag.StringVar(&audioOutput, "audio", "output.ogg", "Output audio file path (use '-' for stdout)")
-	flag.StringVar(&audioOutput, "a", "output.ogg", "Output audio file path (shorthand)")
 	flag.StringVar(&bearerToken, "token", "", "Bearer token for authentication (optional)")
 	flag.StringVar(&bearerToken, "t", "", "Bearer token for authentication (shorthand)")
-	flag.BoolVar(&videoPipe, "video-pipe", false, "Output raw H264 stream to stdout (for piping to ffmpeg)")
+	flag.BoolVar(&videoPipe, "video-pipe", false, "Output raw video stream to stdout (for piping to ffmpeg)")
 	flag.BoolVar(&audioPipe, "audio-pipe", false, "Output raw Opus stream to stdout (for piping to ffmpeg)")
-	flag.BoolVar(&rtpDump, "rtp-dump", true, "Save raw RTP packets to files")
+	flag.StringVar(&videoCodec, "codec", "h264", "Video codec to use (h264, vp8, vp9)")
+	flag.StringVar(&videoCodec, "c", "h264", "Video codec to use (shorthand)")
+	flag.BoolVar(&listCodecs, "list-codecs", false, "List codecs supported by the WHEP server")
+	flag.BoolVar(&listCodecs, "ls", false, "List codecs supported by the WHEP server (shorthand)")
 }
 
 func main() {
@@ -50,14 +45,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Usage:\n")
 		fmt.Fprintf(os.Stderr, "  %s [flags]\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Examples:\n")
-		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep -v stream.ivf -a stream.ogg\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --video-pipe | ffmpeg -i - -c copy output.mp4\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep -v - | ffplay -i -\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --audio-pipe | ffmpeg -i - -c copy output.mp3\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  %s -u http://example.com/whep --list-codecs\n\n", os.Args[0])
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
 
 	flag.Parse()
+
+	if listCodecs {
+		if err := listServerCodecs(); err != nil {
+			log.Fatal(err)
+		}
+		os.Exit(0)
+	}
 
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -70,11 +72,12 @@ func run() error {
 		return fmt.Errorf("cannot pipe both video and audio to stdout simultaneously")
 	}
 
-	if (videoPipe || videoOutput == "-") && (audioPipe || audioOutput == "-") {
+	if videoPipe && audioPipe {
 		return fmt.Errorf("cannot output both video and audio to stdout")
 	}
 
 	fmt.Fprintf(os.Stderr, "Connecting to WHEP server: %s\n", whepURL)
+	fmt.Fprintf(os.Stderr, "Using video codec: %s\n", videoCodec)
 	if bearerToken != "" {
 		fmt.Fprintln(os.Stderr, "Using bearer token authentication")
 	}
@@ -82,14 +85,37 @@ func run() error {
 	// Create a MediaEngine object to configure the supported codec
 	mediaEngine := &webrtc.MediaEngine{}
 
-	// Register codecs - must match what the server supports
-	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType: webrtc.MimeTypeH264, ClockRate: 90000,
-		},
-		PayloadType: 96,
-	}, webrtc.RTPCodecTypeVideo); err != nil {
-		return err
+	// Register video codec based on user selection
+	switch strings.ToLower(videoCodec) {
+	case "h264":
+		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType: webrtc.MimeTypeH264, ClockRate: 90000,
+			},
+			PayloadType: 96,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return err
+		}
+	case "vp8":
+		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType: webrtc.MimeTypeVP8, ClockRate: 90000,
+			},
+			PayloadType: 96,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return err
+		}
+	case "vp9":
+		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType: webrtc.MimeTypeVP9, ClockRate: 90000,
+			},
+			PayloadType: 96,
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported video codec: %s (supported: h264, vp8, vp9)", videoCodec)
 	}
 
 	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
@@ -147,56 +173,20 @@ func run() error {
 		return err
 	}
 
-	// Create writers for saving
-	var videoWriter media.Writer
-	var audioWriter media.Writer
-
-	// Set up video output
-	if !videoPipe && videoOutput != "-" {
-		videoFile, err := ivfwriter.New(videoOutput)
-		if err != nil {
-			return err
-		}
-		videoWriter = videoFile
-	}
-
-	// Set up audio output
-	if !audioPipe && audioOutput != "-" {
-		audioFile, err := oggwriter.New(audioOutput, 48000, 2)
-		if err != nil {
-			return err
-		}
-		audioWriter = audioFile
-	}
-
 	// Set handlers for incoming tracks
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		codec := track.Codec()
 		fmt.Fprintf(os.Stderr, "Track received - Type: %s, Codec: %s\n", track.Kind(), codec.MimeType)
 
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
-			if videoPipe || videoOutput == "-" {
-				// Pipe raw H264 to stdout
-				go pipeRawStream(track, os.Stdout)
-			} else if videoWriter != nil {
-				go saveTrack(videoWriter, track)
-			}
-
-			// For raw RTP dump
-			if rtpDump && !videoPipe && videoOutput != "-" {
-				go extractRTP(track, "video", videoOutput)
+			if videoPipe {
+				// Pipe raw video to stdout
+				go pipeRawStream(track, os.Stdout, videoCodec)
 			}
 		} else {
-			if audioPipe || audioOutput == "-" {
+			if audioPipe {
 				// Pipe raw Opus to stdout
-				go pipeRawStream(track, os.Stdout)
-			} else if audioWriter != nil {
-				go saveTrack(audioWriter, track)
-			}
-
-			// For raw RTP dump
-			if rtpDump && !audioPipe && audioOutput != "-" {
-				go extractRTP(track, "audio", audioOutput)
+				go pipeRawStream(track, os.Stdout, "")
 			}
 		}
 	})
@@ -274,19 +264,11 @@ func run() error {
 	fmt.Fprintln(os.Stderr, "Connected to WHEP server, receiving media...")
 
 	if videoPipe {
-		fmt.Fprintln(os.Stderr, "Piping raw H264 video to stdout")
-	} else if videoOutput == "-" {
-		fmt.Fprintln(os.Stderr, "Writing IVF video to stdout")
-	} else {
-		fmt.Fprintf(os.Stderr, "Video output: %s\n", videoOutput)
+		fmt.Fprintf(os.Stderr, "Piping raw %s video to stdout\n", strings.ToUpper(videoCodec))
 	}
 
 	if audioPipe {
 		fmt.Fprintln(os.Stderr, "Piping raw Opus audio to stdout")
-	} else if audioOutput == "-" {
-		fmt.Fprintln(os.Stderr, "Writing OGG audio to stdout")
-	} else {
-		fmt.Fprintf(os.Stderr, "Audio output: %s\n", audioOutput)
 	}
 
 	fmt.Fprintln(os.Stderr, "Press Ctrl+C to stop")
@@ -300,101 +282,158 @@ func run() error {
 	return nil
 }
 
-// saveTrack saves the track to a media file
-func saveTrack(writer media.Writer, track *webrtc.TrackRemote) {
-	defer func() {
-		if err := writer.Close(); err != nil {
-			fmt.Printf("Error closing writer: %v\n", err)
-		}
-	}()
+func listServerCodecs() error {
+	fmt.Fprintf(os.Stderr, "Connecting to WHEP server to retrieve supported codecs: %s\n", whepURL)
 
-	for {
-		rtpPacket, _, err := track.ReadRTP()
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
-			fmt.Printf("Error reading RTP: %v\n", err)
-			return
-		}
+	// Create a MediaEngine with all possible codecs
+	mediaEngine := &webrtc.MediaEngine{}
 
-		if err := writer.WriteRTP(rtpPacket); err != nil {
-			fmt.Printf("Error writing RTP: %v\n", err)
-			return
-		}
-	}
-}
-
-// extractRTP demonstrates how to get raw RTP packets for custom processing
-func extractRTP(track *webrtc.TrackRemote, trackType string, baseFilename string) {
-	// Open file for raw RTP dump (optional)
-	// Remove extension from base filename
-	base := baseFilename
-	if idx := strings.LastIndex(base, "."); idx != -1 {
-		base = base[:idx]
+	// Register all video codecs
+	videoCodecs := []struct {
+		mimeType    string
+		payloadType uint8
+	}{
+		{webrtc.MimeTypeH264, 96},
+		{webrtc.MimeTypeVP8, 97},
+		{webrtc.MimeTypeVP9, 98},
 	}
 
-	rtpFilename := fmt.Sprintf("%s_%s.rtp", base, trackType)
-	rtpFile, err := os.Create(rtpFilename)
+	for _, codec := range videoCodecs {
+		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+			RTPCodecCapability: webrtc.RTPCodecCapability{
+				MimeType: codec.mimeType, ClockRate: 90000,
+			},
+			PayloadType: webrtc.PayloadType(codec.payloadType),
+		}, webrtc.RTPCodecTypeVideo); err != nil {
+			return err
+		}
+	}
+
+	// Register audio codec
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return err
+	}
+
+	// Create interceptor registry and API
+	interceptorRegistry := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); err != nil {
+		return err
+	}
+
+	api := webrtc.NewAPI(
+		webrtc.WithMediaEngine(mediaEngine),
+		webrtc.WithInterceptorRegistry(interceptorRegistry),
+	)
+
+	// Create peer connection
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+		},
+	}
+
+	peerConnection, err := api.NewPeerConnection(config)
 	if err != nil {
-		fmt.Printf("Error creating RTP file: %v\n", err)
-		return
+		return err
 	}
-	defer rtpFile.Close()
+	defer peerConnection.Close()
 
-	fmt.Printf("Saving raw RTP packets to: %s\n", rtpFilename)
+	// Add transceivers
+	if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeVideo,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+		return err
+	}
 
-	packetCount := 0
-	startTime := time.Now()
+	if _, err = peerConnection.AddTransceiverFromKind(webrtc.RTPCodecTypeAudio,
+		webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionRecvonly}); err != nil {
+		return err
+	}
 
-	for {
-		rtpPacket, _, err := track.ReadRTP()
-		if err != nil {
-			if err == io.EOF {
-				fmt.Printf("%s track ended. Total packets: %d, Duration: %v\n",
-					trackType, packetCount, time.Since(startTime))
-				return
+	// Create offer
+	offer, err := peerConnection.CreateOffer(nil)
+	if err != nil {
+		return err
+	}
+
+	gatherComplete := webrtc.GatheringCompletePromise(peerConnection)
+
+	if err = peerConnection.SetLocalDescription(offer); err != nil {
+		return err
+	}
+
+	<-gatherComplete
+
+	// Send offer to WHEP server
+	req, err := http.NewRequest("POST", whepURL, bytes.NewReader([]byte(peerConnection.LocalDescription().SDP)))
+	if err != nil {
+		return err
+	}
+
+	req.Header.Set("Content-Type", "application/sdp")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("WHEP server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	answer, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if err = peerConnection.SetRemoteDescription(webrtc.SessionDescription{
+		Type: webrtc.SDPTypeAnswer,
+		SDP:  string(answer),
+	}); err != nil {
+		return err
+	}
+
+	// Get negotiated codecs from transceivers
+	fmt.Println("\nSupported codecs by WHEP server:")
+	fmt.Println("\nVideo codecs:")
+
+	transceivers := peerConnection.GetTransceivers()
+	for _, transceiver := range transceivers {
+		if transceiver.Kind() == webrtc.RTPCodecTypeVideo {
+			codecs := transceiver.Receiver().GetParameters().Codecs
+			for _, codec := range codecs {
+				fmt.Printf("  - %s (payload type: %d, clock rate: %d)\n",
+					codec.MimeType, codec.PayloadType, codec.ClockRate)
 			}
-			fmt.Printf("Error reading RTP packet: %v\n", err)
-			return
 		}
-
-		packetCount++
-
-		// Here you can process the raw RTP packet
-		// For example, you could:
-		// 1. Forward to another system
-		// 2. Transcode
-		// 3. Analyze
-		// 4. Save to custom format
-
-		// Example: Print packet info every 100 packets
-		if packetCount%100 == 0 {
-			fmt.Printf("%s: Received %d RTP packets, latest timestamp: %d, SSRC: %d\n",
-				trackType, packetCount, rtpPacket.Timestamp, rtpPacket.SSRC)
-		}
-
-		// Optionally write raw RTP to file
-		data, err := rtpPacket.Marshal()
-		if err != nil {
-			fmt.Printf("Error marshaling RTP packet: %v\n", err)
-			continue
-		}
-
-		// Write packet length (4 bytes) followed by packet data
-		lengthBuf := make([]byte, 4)
-		lengthBuf[0] = byte(len(data) >> 24)
-		lengthBuf[1] = byte(len(data) >> 16)
-		lengthBuf[2] = byte(len(data) >> 8)
-		lengthBuf[3] = byte(len(data))
-
-		rtpFile.Write(lengthBuf)
-		rtpFile.Write(data)
 	}
+
+	fmt.Println("\nAudio codecs:")
+	for _, transceiver := range transceivers {
+		if transceiver.Kind() == webrtc.RTPCodecTypeAudio {
+			codecs := transceiver.Receiver().GetParameters().Codecs
+			for _, codec := range codecs {
+				fmt.Printf("  - %s (payload type: %d, clock rate: %d, channels: %d)\n",
+					codec.MimeType, codec.PayloadType, codec.ClockRate, codec.Channels)
+			}
+		}
+	}
+
+	return nil
 }
 
 // pipeRawStream pipes raw codec data to a writer (typically stdout for ffmpeg)
-func pipeRawStream(track *webrtc.TrackRemote, w io.Writer) {
+func pipeRawStream(track *webrtc.TrackRemote, w io.Writer, codecType string) {
 	// Buffer for accumulating NAL units
 	var nalBuffer []byte
 
@@ -412,69 +451,86 @@ func pipeRawStream(track *webrtc.TrackRemote, w io.Writer) {
 		payload := rtpPacket.Payload
 
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
-			// For H264, we need to handle NAL units properly
-			// This is a simplified version - production code should handle:
-			// - STAP-A (Single Time Aggregation Packet)
-			// - FU-A (Fragmentation Unit)
-			// - Parameter sets (SPS/PPS)
+			switch strings.ToLower(codecType) {
+			case "h264":
+				// For H264, we need to handle NAL units properly
+				// This is a simplified version - production code should handle:
+				// - STAP-A (Single Time Aggregation Packet)
+				// - FU-A (Fragmentation Unit)
+				// - Parameter sets (SPS/PPS)
 
-			if len(payload) < 1 {
-				continue
-			}
-
-			nalType := payload[0] & 0x1F
-
-			// Check for start of new NAL unit
-			if nalType >= 1 && nalType <= 23 {
-				// Single NAL unit packet
-				// Write start code
-				startCode := []byte{0x00, 0x00, 0x00, 0x01}
-				if _, err := w.Write(startCode); err != nil {
-					fmt.Fprintf(os.Stderr, "Error writing start code: %v\n", err)
-					return
-				}
-
-				// Write NAL unit
-				if _, err := w.Write(payload); err != nil {
-					fmt.Fprintf(os.Stderr, "Error writing NAL unit: %v\n", err)
-					return
-				}
-			} else if nalType == 28 {
-				// FU-A fragmentation
-				if len(payload) < 2 {
+				if len(payload) < 1 {
 					continue
 				}
 
-				fuHeader := payload[1]
-				isStart := (fuHeader & 0x80) != 0
-				isEnd := (fuHeader & 0x40) != 0
+				nalType := payload[0] & 0x1F
 
-				if isStart {
-					// Start of fragmented NAL
-					nalBuffer = nil
-					// Reconstruct NAL header
-					nalHeader := (payload[0] & 0xE0) | (fuHeader & 0x1F)
-					nalBuffer = append(nalBuffer, nalHeader)
-				}
-
-				// Append fragment data
-				if len(payload) > 2 {
-					nalBuffer = append(nalBuffer, payload[2:]...)
-				}
-
-				if isEnd && len(nalBuffer) > 0 {
-					// End of fragmented NAL - write it out
+				// Check for start of new NAL unit
+				if nalType >= 1 && nalType <= 23 {
+					// Single NAL unit packet
+					// Write start code
 					startCode := []byte{0x00, 0x00, 0x00, 0x01}
 					if _, err := w.Write(startCode); err != nil {
 						fmt.Fprintf(os.Stderr, "Error writing start code: %v\n", err)
 						return
 					}
 
-					if _, err := w.Write(nalBuffer); err != nil {
+					// Write NAL unit
+					if _, err := w.Write(payload); err != nil {
 						fmt.Fprintf(os.Stderr, "Error writing NAL unit: %v\n", err)
 						return
 					}
-					nalBuffer = nil
+				} else if nalType == 28 {
+					// FU-A fragmentation
+					if len(payload) < 2 {
+						continue
+					}
+
+					fuHeader := payload[1]
+					isStart := (fuHeader & 0x80) != 0
+					isEnd := (fuHeader & 0x40) != 0
+
+					if isStart {
+						// Start of fragmented NAL
+						nalBuffer = nil
+						// Reconstruct NAL header
+						nalHeader := (payload[0] & 0xE0) | (fuHeader & 0x1F)
+						nalBuffer = append(nalBuffer, nalHeader)
+					}
+
+					// Append fragment data
+					if len(payload) > 2 {
+						nalBuffer = append(nalBuffer, payload[2:]...)
+					}
+
+					if isEnd && len(nalBuffer) > 0 {
+						// End of fragmented NAL - write it out
+						startCode := []byte{0x00, 0x00, 0x00, 0x01}
+						if _, err := w.Write(startCode); err != nil {
+							fmt.Fprintf(os.Stderr, "Error writing start code: %v\n", err)
+							return
+						}
+
+						if _, err := w.Write(nalBuffer); err != nil {
+							fmt.Fprintf(os.Stderr, "Error writing NAL unit: %v\n", err)
+							return
+						}
+						nalBuffer = nil
+					}
+				}
+			case "vp8", "vp9":
+				// VP8/VP9 uses IVF format when piping
+				// Write raw RTP payload data for VP8/VP9
+				// The payload is already the VP8/VP9 frame data
+				if _, err := w.Write(payload); err != nil {
+					fmt.Fprintf(os.Stderr, "Error writing VP8/VP9 payload: %v\n", err)
+					return
+				}
+			default:
+				// For other codecs, write raw payload
+				if _, err := w.Write(payload); err != nil {
+					fmt.Fprintf(os.Stderr, "Error writing video payload: %v\n", err)
+					return
 				}
 			}
 		} else {
