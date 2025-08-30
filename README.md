@@ -26,6 +26,12 @@ go build -o go-webrtc-whep-client main.go
 # Play MPEG-TS stream with muxed audio and video
 ./go-webrtc-whep-client -u http://example.com/whep --mpegts | ffplay -f mpegts -i -
 
+# Play MPEG-TS stream with video only (no audio)
+./go-webrtc-whep-client -u http://example.com/whep --mpegts-video-only | ffplay -f mpegts -i -
+
+# Play WebM/Matroska stream with muxed audio and video
+./go-webrtc-whep-client -u http://example.com/whep --webm | ffplay -i -
+
 # Play Cloudflare Stream video
 ./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play --video-pipe | ffplay -i -
 
@@ -39,6 +45,8 @@ go build -o go-webrtc-whep-client main.go
 - `-v, --video-pipe`: Output video to stdout
 - `-a, --audio-pipe`: Output audio to stdout
 - `-m, --mpegts`: Output MPEG-TS stream with muxed audio and video to stdout
+- `--mpegts-video-only`: Output MPEG-TS stream with video only (no audio)
+- `-w, --webm`: Output WebM/Matroska stream with muxed audio and video to stdout
 - `-c, --codec`: Video codec (h264/vp8/vp9, default: h264)
 - `-l, --list-codecs`: List server codecs
 - `-d, --debug`: Show debug logs
@@ -83,6 +91,12 @@ go build -o go-webrtc-whep-client main.go
 # MPEG-TSストリームで音声・映像を同時再生
 ./go-webrtc-whep-client -u http://example.com/whep --mpegts | ffplay -f mpegts -i -
 
+# MPEG-TSストリームで映像のみ再生（音声なし）
+./go-webrtc-whep-client -u http://example.com/whep --mpegts-video-only | ffplay -f mpegts -i -
+
+# WebM/Matroskaストリームで音声・映像を同時再生
+./go-webrtc-whep-client -u http://example.com/whep --webm | ffplay -i -
+
 # Cloudflare Streamのビデオを再生
 ./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play --video-pipe | ffplay -i -
 
@@ -96,6 +110,8 @@ go build -o go-webrtc-whep-client main.go
 - `-v, --video-pipe`: ビデオをstdoutに出力
 - `-a, --audio-pipe`: オーディオをstdoutに出力
 - `-m, --mpegts`: MPEG-TSストリームで音声・映像を多重化してstdoutに出力
+- `--mpegts-video-only`: MPEG-TSストリームで映像のみ出力（音声なし）
+- `-w, --webm`: WebM/Matroskaストリームで音声・映像を多重化してstdoutに出力
 - `-c, --codec`: ビデオコーデック (h264/vp8/vp9、デフォルト: h264)
 - `-l, --list-codecs`: サーバーのコーデック一覧表示
 - `-d, --debug`: デバッグログ表示
