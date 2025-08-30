@@ -4,6 +4,12 @@ A Go client that receives WebRTC streams via WHEP protocol and pipes them to ffm
 
 ## Installation
 
+### Using go install
+```bash
+go install github.com/Azunyan1111/go-webrtc-whep-client@latest
+```
+
+### Build from source
 ```bash
 go build -o go-webrtc-whep-client main.go
 ```
@@ -42,6 +48,12 @@ WHEPプロトコルでWebRTCストリームを受信し、ffmpegにパイプで�
 
 ## インストール
 
+### go installを使う方法
+```bash
+go install github.com/Azunyan1111/go-webrtc-whep-client@latest
+```
+
+### ソースからビルド
 ```bash
 go build -o go-webrtc-whep-client main.go
 ```
