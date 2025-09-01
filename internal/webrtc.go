@@ -125,36 +125,7 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 			processor := NewDefaultRTPProcessor()
 
 			// Create appropriate writer based on output configuration
-			if MPEGTSOutput {
-				if MPEGTSVideoOnly {
-					// MPEG-TS with video only
-					if videoTrack != nil {
-						writer = NewMPEGTSStreamWriter(os.Stdout, videoTrack, nil)
-						streamManager = NewStreamManager(writer, processor)
-						streamManager.AddVideoTrack(videoTrack, VideoCodec)
-						go func() {
-							if err := streamManager.Run(); err != nil {
-								fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
-								os.Exit(1)
-							}
-						}()
-					}
-				} else {
-					// MPEG-TS with both audio and video
-					if videoTrack != nil && audioTrack != nil {
-						writer = NewMPEGTSStreamWriter(os.Stdout, videoTrack, audioTrack)
-						streamManager = NewStreamManager(writer, processor)
-						streamManager.AddVideoTrack(videoTrack, VideoCodec)
-						streamManager.AddAudioTrack(audioTrack)
-						go func() {
-							if err := streamManager.Run(); err != nil {
-								fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
-								os.Exit(1)
-							}
-						}()
-					}
-				}
-			} else if WebMOutput {
+			if WebMOutput {
 				// WebM with both audio and video
 				if videoTrack != nil && audioTrack != nil {
 					writer = NewWebMStreamWriter(os.Stdout, videoTrack, audioTrack)
