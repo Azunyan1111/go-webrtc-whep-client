@@ -8,13 +8,14 @@ import (
 )
 
 var (
-	WhepURL         string
-	VideoPipe       bool
-	AudioPipe       bool
-	VideoCodec      string
-	ListCodecs      bool
-	DebugMode       bool
-	WebMOutput      bool
+	WhepURL    string
+	VideoPipe  bool
+	AudioPipe  bool
+	VideoCodec string
+	ListCodecs bool
+	DebugMode  bool
+	WebMOutput bool
+	SDPOutput  bool
 )
 
 func init() {
@@ -25,6 +26,7 @@ func init() {
 	pflag.BoolVarP(&ListCodecs, "list-codecs", "l", false, "List codecs supported by the WHEP server")
 	pflag.BoolVarP(&DebugMode, "debug", "d", false, "Enable debug logging")
 	pflag.BoolVarP(&WebMOutput, "webm", "w", false, "Output WebM/Matroska stream with muxed audio and video to stdout")
+	pflag.BoolVarP(&SDPOutput, "sdp", "s", false, "Output SDP stream (for debugging and analysis)")
 }
 
 func SetupUsage() {

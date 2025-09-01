@@ -106,6 +106,7 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 	var videoTrack *webrtc.TrackRemote
 	var audioTrack *webrtc.TrackRemote
 	var streamManager *StreamManager
+	var sdpWriter *SDPStreamWriter
 
 	// Set handlers for incoming tracks
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -115,8 +116,10 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 		// Store tracks
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
 			videoTrack = track
+			fmt.Fprintf(os.Stderr, "Video track received: %s\n", codec.MimeType)
 		} else if track.Kind() == webrtc.RTPCodecTypeAudio {
 			audioTrack = track
+			fmt.Fprintf(os.Stderr, "Audio track received: %s\n", codec.MimeType)
 		}
 
 		// Initialize stream manager if not already done
@@ -139,9 +142,56 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 						}
 					}()
 				}
-			} else if VideoPipe || AudioPipe {
-				// Raw stream output
-				if track.Kind() == webrtc.RTPCodecTypeVideo && VideoPipe {
+			} else if VideoPipe || AudioPipe || SDPOutput {
+				// Raw stream output or SDP output
+				if SDPOutput {
+					// SDP output mode - create SDP writer and handle RTP packets directly
+					if sdpWriter == nil {
+						sdpWriter = NewSDPStreamWriter(os.Stdout)
+
+						// Start the SDP writer
+						fmt.Fprintf(os.Stderr, "Starting SDP writer\n")
+						go func() {
+							if err := sdpWriter.Run(); err != nil {
+								fmt.Fprintf(os.Stderr, "SDP writer error: %v\n", err)
+								os.Exit(1)
+							}
+						}()
+					}
+
+					// Process track based on type
+					if track.Kind() == webrtc.RTPCodecTypeVideo {
+						fmt.Fprintf(os.Stderr, "Processing video track in SDP mode\n")
+						go func() {
+							for {
+								rtpPacket, _, err := track.ReadRTP()
+								if err != nil {
+									fmt.Fprintf(os.Stderr, "Error reading video RTP: %v\n", err)
+									return
+								}
+								if err := sdpWriter.WriteVideoRTPPacket(rtpPacket); err != nil {
+									fmt.Fprintf(os.Stderr, "Error writing video RTP packet: %v\n", err)
+									return
+								}
+							}
+						}()
+					} else if track.Kind() == webrtc.RTPCodecTypeAudio {
+						fmt.Fprintf(os.Stderr, "Processing audio track in SDP mode\n")
+						go func() {
+							for {
+								rtpPacket, _, err := track.ReadRTP()
+								if err != nil {
+									fmt.Fprintf(os.Stderr, "Error reading audio RTP: %v\n", err)
+									return
+								}
+								if err := sdpWriter.WriteAudioRTPPacket(rtpPacket); err != nil {
+									fmt.Fprintf(os.Stderr, "Error writing audio RTP packet: %v\n", err)
+									return
+								}
+							}
+						}()
+					}
+				} else if track.Kind() == webrtc.RTPCodecTypeVideo && VideoPipe {
 					// H264の場合は直接書き込み方式を使用（遅延を避けるため）
 					if VideoCodec == "h264" {
 						h264Processor := NewH264DirectStreamProcessor(videoTrack, os.Stdout)

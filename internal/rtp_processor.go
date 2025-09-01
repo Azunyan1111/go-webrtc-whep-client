@@ -8,11 +8,11 @@ import (
 
 // DefaultRTPProcessor は標準的なRTPパケット処理を実装
 type DefaultRTPProcessor struct {
-	nalBuffer       []byte
-	currentFrame    []byte
-	firstTimestamp  uint32
-	seenKeyFrame    bool
-	h264FrameBuffer []byte // H264フレーム全体を蓄積
+	nalBuffer         []byte
+	currentFrame      []byte
+	firstTimestamp    uint32
+	seenKeyFrame      bool
+	h264FrameBuffer   []byte // H264フレーム全体を蓄積
 	lastH264Timestamp uint32
 }
 

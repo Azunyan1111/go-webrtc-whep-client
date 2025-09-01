@@ -285,13 +285,12 @@ func (m *WebMMuxer) Stop() error {
 	return nil
 }
 
-
 func (m *WebMMuxer) writeVideoFrame(data []byte, timestamp uint32) error {
 	// Calculate timecode in milliseconds using synchronized base timestamp
 	m.mutex.Lock()
 	baseTS := m.baseTimestamp
 	m.mutex.Unlock()
-	
+
 	// Convert to 90kHz base first, then to milliseconds
 	relativeTS := timestamp - baseTS
 	timecode := uint64(relativeTS) * 1000 / 90000 // 90kHz to ms
@@ -375,7 +374,7 @@ func (m *WebMMuxer) writeAudioFrame(data []byte, timestamp uint32) error {
 	m.mutex.Lock()
 	baseTS := m.baseTimestamp
 	m.mutex.Unlock()
-	
+
 	// Opus uses 48kHz clock rate
 	relativeTS := timestamp - baseTS
 	timecode := uint64(relativeTS) * 1000 / 48000 // 48kHz to ms

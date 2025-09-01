@@ -3,6 +3,7 @@ package internal
 import (
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
 	"github.com/pion/webrtc/v4"
@@ -18,6 +19,9 @@ type StreamManager struct {
 	done       chan struct{}
 	errChan    chan error
 	wg         sync.WaitGroup
+	closeOnce  sync.Once
+	mu         sync.Mutex
+	running    bool
 }
 
 // NewStreamManager は新しいストリームマネージャーを作成
@@ -32,17 +36,42 @@ func NewStreamManager(writer StreamWriter, processor RTPProcessor) *StreamManage
 
 // AddVideoTrack はビデオトラックを追加
 func (sm *StreamManager) AddVideoTrack(track *webrtc.TrackRemote, codecType string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
 	sm.videoTrack = track
 	sm.codecType = codecType
+
+	// 既に実行中の場合、新しいトラックの処理を開始
+	if sm.running && track != nil {
+		sm.wg.Add(1)
+		go sm.processVideoStream()
+	}
 }
 
 // AddAudioTrack はオーディオトラックを追加
 func (sm *StreamManager) AddAudioTrack(track *webrtc.TrackRemote) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
 	sm.audioTrack = track
+
+	// 既に実行中の場合、新しいトラックの処理を開始
+	if sm.running && track != nil {
+		sm.wg.Add(1)
+		go sm.processAudioStream()
+	}
 }
 
 // Run はストリーム処理を開始
 func (sm *StreamManager) Run() error {
+	sm.mu.Lock()
+	sm.running = true
+	// 現在のトラックを取得
+	videoTrack := sm.videoTrack
+	audioTrack := sm.audioTrack
+	sm.mu.Unlock()
+
 	// WriterのRunメソッドがあれば実行
 	if runner, ok := sm.writer.(interface{ Run() error }); ok {
 		go func() {
@@ -53,13 +82,13 @@ func (sm *StreamManager) Run() error {
 	}
 
 	// ビデオストリーム処理
-	if sm.videoTrack != nil {
+	if videoTrack != nil {
 		sm.wg.Add(1)
 		go sm.processVideoStream()
 	}
 
 	// オーディオストリーム処理
-	if sm.audioTrack != nil {
+	if audioTrack != nil {
 		sm.wg.Add(1)
 		go sm.processAudioStream()
 	}
@@ -67,7 +96,9 @@ func (sm *StreamManager) Run() error {
 	// エラー監視
 	go func() {
 		sm.wg.Wait()
-		close(sm.errChan)
+		sm.closeOnce.Do(func() {
+			close(sm.errChan)
+		})
 	}()
 
 	// エラーをチェック
@@ -94,6 +125,7 @@ func (sm *StreamManager) Stop() error {
 // processVideoStream はビデオストリームを処理
 func (sm *StreamManager) processVideoStream() {
 	defer sm.wg.Done()
+	fmt.Fprintf(os.Stderr, "Starting video stream processing\n")
 
 	for {
 		select {
@@ -132,6 +164,7 @@ func (sm *StreamManager) processVideoStream() {
 // processAudioStream はオーディオストリームを処理
 func (sm *StreamManager) processAudioStream() {
 	defer sm.wg.Done()
+	fmt.Fprintf(os.Stderr, "Starting audio stream processing\n")
 
 	for {
 		select {
