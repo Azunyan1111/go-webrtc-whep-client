@@ -302,7 +302,7 @@ func (m *MPEGTSMuxer) writeAudioPES(opusData []byte, rtpTimestamp uint32) {
 	pts := m.calculatePTS(rtpTimestamp, m.audioBaseTS, 48000)
 
 	// デバッグログ
-	if len(opusData) > 0 {
+	if DebugMode && len(opusData) > 0 {
 		fmt.Fprintf(os.Stderr, "Audio PES: size=%d, pts=%d\n", len(opusData), pts)
 	}
 

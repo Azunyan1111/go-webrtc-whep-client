@@ -105,62 +105,111 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 	// Track storage for muxing
 	var videoTrack *webrtc.TrackRemote
 	var audioTrack *webrtc.TrackRemote
-	var mpegTSMuxer *MPEGTSMuxer
-	var webmMuxer *WebMMuxer
+	var streamManager *StreamManager
 
 	// Set handlers for incoming tracks
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		codec := track.Codec()
 		DebugLog("Track received - Type: %s, Codec: %s\n", track.Kind(), codec.MimeType)
 
-		if MPEGTSOutput || WebMOutput {
-			// Store tracks for muxing
-			if track.Kind() == webrtc.RTPCodecTypeVideo {
-				videoTrack = track
-			} else if track.Kind() == webrtc.RTPCodecTypeAudio {
-				audioTrack = track
-			}
+		// Store tracks
+		if track.Kind() == webrtc.RTPCodecTypeVideo {
+			videoTrack = track
+		} else if track.Kind() == webrtc.RTPCodecTypeAudio {
+			audioTrack = track
+		}
 
-			// Start muxer based on configuration
+		// Initialize stream manager if not already done
+		if streamManager == nil {
+			var writer StreamWriter
+			processor := NewDefaultRTPProcessor()
+
+			// Create appropriate writer based on output configuration
 			if MPEGTSOutput {
 				if MPEGTSVideoOnly {
-					// Start muxer with video only
-					if videoTrack != nil && mpegTSMuxer == nil {
-						mpegTSMuxer = NewMPEGTSMuxer(os.Stdout, videoTrack, nil)
-						go mpegTSMuxer.Run()
+					// MPEG-TS with video only
+					if videoTrack != nil {
+						writer = NewMPEGTSStreamWriter(os.Stdout, videoTrack, nil)
+						streamManager = NewStreamManager(writer, processor)
+						streamManager.AddVideoTrack(videoTrack, VideoCodec)
+						go func() {
+							if err := streamManager.Run(); err != nil {
+								fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
+								os.Exit(1)
+							}
+						}()
 					}
 				} else {
-					// Start muxer when both tracks are available
-					if videoTrack != nil && audioTrack != nil && mpegTSMuxer == nil {
-						mpegTSMuxer = NewMPEGTSMuxer(os.Stdout, videoTrack, audioTrack)
-						go mpegTSMuxer.Run()
+					// MPEG-TS with both audio and video
+					if videoTrack != nil && audioTrack != nil {
+						writer = NewMPEGTSStreamWriter(os.Stdout, videoTrack, audioTrack)
+						streamManager = NewStreamManager(writer, processor)
+						streamManager.AddVideoTrack(videoTrack, VideoCodec)
+						streamManager.AddAudioTrack(audioTrack)
+						go func() {
+							if err := streamManager.Run(); err != nil {
+								fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
+								os.Exit(1)
+							}
+						}()
 					}
 				}
 			} else if WebMOutput {
-				// Start WebM muxer when both video and audio tracks are available
-				// This ensures audio is properly included
-				if videoTrack != nil && audioTrack != nil && webmMuxer == nil {
-					webmMuxer = NewWebMMuxer(os.Stdout, videoTrack, audioTrack)
+				// WebM with both audio and video
+				if videoTrack != nil && audioTrack != nil {
+					writer = NewWebMStreamWriter(os.Stdout, videoTrack, audioTrack)
+					streamManager = NewStreamManager(writer, processor)
+					streamManager.AddVideoTrack(videoTrack, VideoCodec)
+					streamManager.AddAudioTrack(audioTrack)
 					go func() {
-						if err := webmMuxer.Run(); err != nil {
-							fmt.Fprintf(os.Stderr, "WebM muxer error: %v\n", err)
+						if err := streamManager.Run(); err != nil {
+							fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
+							os.Exit(1)
+						}
+					}()
+				}
+			} else if VideoPipe || AudioPipe {
+				// Raw stream output
+				if track.Kind() == webrtc.RTPCodecTypeVideo && VideoPipe {
+					// H264の場合は直接書き込み方式を使用（遅延を避けるため）
+					if VideoCodec == "h264" {
+						h264Processor := NewH264DirectStreamProcessor(videoTrack, os.Stdout)
+						go func() {
+							if err := h264Processor.Run(); err != nil {
+								fmt.Fprintf(os.Stderr, "H264 processor error: %v\n", err)
+								os.Exit(1)
+							}
+						}()
+					} else {
+						// VP8/VP9は新しい方式を使用
+						writer = NewRawStreamWriter(os.Stdout, VideoCodec)
+						streamManager = NewStreamManager(writer, processor)
+						streamManager.AddVideoTrack(videoTrack, VideoCodec)
+						go func() {
+							if err := streamManager.Run(); err != nil {
+								fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
+								os.Exit(1)
+							}
+						}()
+					}
+				} else if track.Kind() == webrtc.RTPCodecTypeAudio && AudioPipe {
+					writer = NewRawStreamWriter(os.Stdout, "opus")
+					streamManager = NewStreamManager(writer, processor)
+					streamManager.AddAudioTrack(audioTrack)
+					go func() {
+						if err := streamManager.Run(); err != nil {
+							fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
 							os.Exit(1)
 						}
 					}()
 				}
 			}
 		} else {
-			// Original pipe behavior
+			// Update existing stream manager with new track
 			if track.Kind() == webrtc.RTPCodecTypeVideo {
-				if VideoPipe {
-					// Pipe raw video to stdout
-					go PipeRawStream(track, os.Stdout, VideoCodec)
-				}
-			} else {
-				if AudioPipe {
-					// Pipe raw Opus to stdout
-					go PipeRawStream(track, os.Stdout, "")
-				}
+				streamManager.AddVideoTrack(videoTrack, VideoCodec)
+			} else if track.Kind() == webrtc.RTPCodecTypeAudio {
+				streamManager.AddAudioTrack(audioTrack)
 			}
 		}
 	})
