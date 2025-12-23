@@ -7,7 +7,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// WebMStreamWriter はWebMコンテナに出力するライター
+// WebMStreamWriter はMatroska (MKV) コンテナに出力するライター
 type WebMStreamWriter struct {
 	muxer       *WebMMuxer
 	mu          sync.Mutex
@@ -72,7 +72,7 @@ func (w *WebMStreamWriter) WriteAudioFrame(data []byte, timestamp uint32) error 
 	return w.muxer.writeAudioFrame(data, timestamp)
 }
 
-// Run はWebMマルチプレクサのメインループを実行
+// Run はMatroska (MKV) マルチプレクサのメインループを実行
 func (w *WebMStreamWriter) Run() error {
 	// ヘッダーを初期化
 	if err := w.muxer.Initialize(); err != nil {

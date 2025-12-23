@@ -1,6 +1,6 @@
 # go-webrtc-whep-client
 
-A Go client that receives WebRTC streams via WHEP protocol and pipes them to ffplay for playback verification. Compatible with Cloudflare Stream and other WHEP-compliant servers.
+A Go client that receives WebRTC streams via WHEP protocol and pipes a Matroska (MKV) stream to ffplay for playback verification. Compatible with Cloudflare Stream and other WHEP-compliant servers.
 
 ## Installation
 
@@ -17,17 +17,11 @@ go build -o go-webrtc-whep-client main.go
 ## Usage
 
 ```bash
-# Play video stream with ffplay
-./go-webrtc-whep-client -u http://example.com/whep --video-pipe | ffplay -i -
-
-# Play audio stream with ffplay
-./go-webrtc-whep-client -u http://example.com/whep --audio-pipe | ffplay -i -
-
-# Play WebM/Matroska stream with muxed audio and video
-./go-webrtc-whep-client -u http://example.com/whep --webm | ffplay -i -
+# Play Matroska (MKV) stream with muxed audio and video
+./go-webrtc-whep-client -u http://example.com/whep | ffplay -i -
 
 # Play Cloudflare Stream video
-./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play --video-pipe | ffplay -i -
+./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play | ffplay -i -
 
 # Check server codecs
 ./go-webrtc-whep-client -u http://example.com/whep --list-codecs
@@ -36,9 +30,6 @@ go build -o go-webrtc-whep-client main.go
 ## Options
 
 - `-u, --url`: WHEP server URL (default: http://localhost:8080/whep)
-- `-v, --video-pipe`: Output video to stdout
-- `-a, --audio-pipe`: Output audio to stdout
-- `-w, --webm`: Output WebM/Matroska stream with muxed audio and video to stdout
 - `-c, --codec`: Video codec (h264/vp8/vp9, default: h264)
 - `-l, --list-codecs`: List server codecs
 - `-d, --debug`: Show debug logs
@@ -57,7 +48,7 @@ MIT
 
 # go-webrtc-whep-client
 
-WHEPプロトコルでWebRTCストリームを受信し、ffplayにパイプして再生確認ができるGoクライアント。Cloudflare Streamなどの WHEP対応サーバーで使用可能。
+WHEPプロトコルでWebRTCストリームを受信し、Matroska (MKV) をffplayにパイプして再生確認ができるGoクライアント。Cloudflare Streamなどの WHEP対応サーバーで使用可能。
 
 ## インストール
 
@@ -74,17 +65,11 @@ go build -o go-webrtc-whep-client main.go
 ## 使い方
 
 ```bash
-# ビデオストリームをffplayで再生
-./go-webrtc-whep-client -u http://example.com/whep --video-pipe | ffplay -i -
-
-# オーディオストリームをffplayで再生
-./go-webrtc-whep-client -u http://example.com/whep --audio-pipe | ffplay -i -
-
-# WebM/Matroskaストリームで音声・映像を同時再生
-./go-webrtc-whep-client -u http://example.com/whep --webm | ffplay -i -
+# Matroska (MKV) で音声・映像を同時再生
+./go-webrtc-whep-client -u http://example.com/whep | ffplay -i -
 
 # Cloudflare Streamのビデオを再生
-./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play --video-pipe | ffplay -i -
+./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play | ffplay -i -
 
 # サーバーのコーデック確認
 ./go-webrtc-whep-client -u http://example.com/whep --list-codecs
@@ -93,9 +78,6 @@ go build -o go-webrtc-whep-client main.go
 ## オプション
 
 - `-u, --url`: WHEPサーバーURL (デフォルト: http://localhost:8080/whep)
-- `-v, --video-pipe`: ビデオをstdoutに出力
-- `-a, --audio-pipe`: オーディオをstdoutに出力
-- `-w, --webm`: WebM/Matroskaストリームで音声・映像を多重化してstdoutに出力
 - `-c, --codec`: ビデオコーデック (h264/vp8/vp9、デフォルト: h264)
 - `-l, --list-codecs`: サーバーのコーデック一覧表示
 - `-d, --debug`: デバッグログ表示

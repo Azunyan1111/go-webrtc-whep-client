@@ -13,7 +13,7 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-// WebM/Matroska EBML IDs
+// Matroska (MKV) EBML IDs
 const (
 	EBMLHeader  = 0x1A45DFA3
 	Segment     = 0x18538067
@@ -91,7 +91,7 @@ func NewWebMMuxer(w io.Writer, videoTrack, audioTrack *webrtc.TrackRemote) *WebM
 	}
 }
 
-// Initialize はWebMヘッダーを初期化して書き込む
+// Initialize はMatroska (MKV) ヘッダーを初期化して書き込む
 func (m *WebMMuxer) Initialize() error {
 	// Write EBML header
 	if err := m.writeEBMLHeader(); err != nil {

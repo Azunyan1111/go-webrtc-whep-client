@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/Azunyan1111/go-webrtc-whep-client/internal"
@@ -29,21 +28,6 @@ func main() {
 }
 
 func run() error {
-	// Validate pipe options
-	pipeCount := 0
-	if internal.VideoPipe {
-		pipeCount++
-	}
-	if internal.AudioPipe {
-		pipeCount++
-	}
-	if internal.WebMOutput {
-		pipeCount++
-	}
-	if pipeCount > 1 {
-		return fmt.Errorf("cannot use multiple output options simultaneously")
-	}
-
 	fmt.Fprintf(os.Stderr, "Connecting to WHEP server: %s\n", internal.WhepURL)
 	fmt.Fprintf(os.Stderr, "Using video codec: %s\n", internal.VideoCodec)
 
@@ -71,17 +55,7 @@ func run() error {
 
 	fmt.Fprintln(os.Stderr, "Connected to WHEP server, receiving media...")
 
-	if internal.VideoPipe {
-		fmt.Fprintf(os.Stderr, "Piping raw %s video to stdout\n", strings.ToUpper(internal.VideoCodec))
-	}
-
-	if internal.AudioPipe {
-		fmt.Fprintln(os.Stderr, "Piping raw Opus audio to stdout")
-	}
-
-	if internal.WebMOutput {
-		fmt.Fprintln(os.Stderr, "Piping WebM stream with muxed audio/video to stdout")
-	}
+	fmt.Fprintln(os.Stderr, "Piping Matroska (MKV) stream with muxed audio/video to stdout")
 
 	fmt.Fprintln(os.Stderr, "Press Ctrl+C to stop")
 
