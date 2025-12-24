@@ -28,8 +28,13 @@ func main() {
 }
 
 func run() error {
+	if err := internal.ValidateOutputFormat(); err != nil {
+		return err
+	}
+
 	fmt.Fprintf(os.Stderr, "Connecting to WHEP server: %s\n", internal.WhepURL)
 	fmt.Fprintf(os.Stderr, "Using video codec: %s\n", internal.VideoCodec)
+	fmt.Fprintf(os.Stderr, "Output format: %s\n", internal.OutputFormat)
 
 	// Create MediaEngine with selected codec
 	mediaEngine, err := internal.CreateMediaEngine(internal.VideoCodec)
@@ -55,7 +60,11 @@ func run() error {
 
 	fmt.Fprintln(os.Stderr, "Connected to WHEP server, receiving media...")
 
-	fmt.Fprintln(os.Stderr, "Piping Matroska (MKV) stream with muxed audio/video to stdout")
+	if internal.OutputFormat == internal.OutputFormatRawVideo {
+		fmt.Fprintln(os.Stderr, "Piping raw video stream to stdout")
+	} else {
+		fmt.Fprintln(os.Stderr, "Piping Matroska (MKV) stream with muxed audio/video to stdout")
+	}
 
 	fmt.Fprintln(os.Stderr, "Press Ctrl+C to stop")
 

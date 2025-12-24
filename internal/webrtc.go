@@ -106,6 +106,7 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 	var videoTrack *webrtc.TrackRemote
 	var audioTrack *webrtc.TrackRemote
 	var streamManager *StreamManager
+	outputFormat := OutputFormat
 
 	// Set handlers for incoming tracks
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -121,27 +122,41 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 			fmt.Fprintf(os.Stderr, "Audio track received: %s\n", codec.MimeType)
 		}
 
-		if streamManager == nil && (videoTrack == nil || audioTrack == nil) {
-			fmt.Fprintln(os.Stderr, "Waiting for both audio and video tracks to start MKV output")
-		}
-
 		// Initialize stream manager if not already done
 		if streamManager == nil {
-			var writer StreamWriter
 			processor := NewDefaultRTPProcessor()
-
-			// Matroska (MKV) output with muxed audio/video
-			if videoTrack != nil && audioTrack != nil {
-				writer = NewWebMStreamWriter(os.Stdout, videoTrack, audioTrack)
-				streamManager = NewStreamManager(writer, processor)
-				streamManager.AddVideoTrack(videoTrack, VideoCodec)
-				streamManager.AddAudioTrack(audioTrack)
+			startStreamManager := func() {
 				go func() {
 					if err := streamManager.Run(); err != nil {
 						fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
 						os.Exit(1)
 					}
 				}()
+			}
+
+			switch outputFormat {
+			case OutputFormatRawVideo:
+				if videoTrack == nil {
+					fmt.Fprintln(os.Stderr, "Waiting for video track to start rawvideo output")
+					return
+				}
+				writer := NewRawVideoStreamWriter(os.Stdout, VideoCodec)
+				streamManager = NewStreamManager(writer, processor)
+				streamManager.AddVideoTrack(videoTrack, VideoCodec)
+				if audioTrack != nil {
+					streamManager.AddAudioTrack(audioTrack)
+				}
+				startStreamManager()
+			default:
+				if videoTrack == nil || audioTrack == nil {
+					fmt.Fprintln(os.Stderr, "Waiting for both audio and video tracks to start MKV output")
+					return
+				}
+				writer := NewWebMStreamWriter(os.Stdout, videoTrack, audioTrack)
+				streamManager = NewStreamManager(writer, processor)
+				streamManager.AddVideoTrack(videoTrack, VideoCodec)
+				streamManager.AddAudioTrack(audioTrack)
+				startStreamManager()
 			}
 		} else {
 			// Update existing stream manager with new track
