@@ -145,9 +145,10 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 	if err := vpx.Error(vpx.CodecDecode(w.ctx, string(data), uint32(len(data)), nil, 0)); err != nil {
 		// Debug: dump failed frame header
 		if len(data) >= 10 {
-			DebugLog("Decode failed: len=%d, header=%x, keyframe=%v\n", len(data), data[:10], keyframe)
+			DebugLog("Decode failed (skipping): len=%d, header=%x, keyframe=%v\n", len(data), data[:10], keyframe)
 		}
-		return fmt.Errorf("failed to decode frame: %w", err)
+		// エラーが発生してもスキップして継続
+		return nil
 	}
 
 	// デコードされた画像を取得
@@ -158,11 +159,25 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 	}
 	img.Deref()
 
-	// 解像度が未知の場合、最初のフレームから取得してヘッダーを書き込む
+	// 解像度が未知の場合、十分な解像度のキーフレームを待ってから確定しヘッダーを書き込む
+	// サーバーが最初に低解像度のプレビューキーフレームを送ることがあるため
+	frameWidth := int(img.DW)
+	frameHeight := int(img.DH)
+
 	if !w.resolutionKnown {
-		w.width = int(img.DW)
-		w.height = int(img.DH)
+		if !keyframe {
+			DebugLog("Waiting for keyframe to determine resolution\n")
+			return nil
+		}
+		// 360p未満の解像度は低解像度プレビューとみなしてスキップ
+		if frameWidth < 640 || frameHeight < 360 {
+			DebugLog("Skipping low-resolution keyframe: %dx%d (waiting for >= 640x360)\n", frameWidth, frameHeight)
+			return nil
+		}
+		w.width = frameWidth
+		w.height = frameHeight
 		w.resolutionKnown = true
+		DebugLog("Resolution detected from keyframe: %dx%d\n", w.width, w.height)
 
 		if err := w.writeHeaders(); err != nil {
 			return fmt.Errorf("failed to write headers: %w", err)
