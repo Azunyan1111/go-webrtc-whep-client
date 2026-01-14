@@ -72,6 +72,7 @@ type RawVideoMKVWriter struct {
 	running         chan struct{}
 	initialized     bool
 	decoderInit     bool
+	lastValidFrame  []byte // 最後に成功したRGBAフレームデータ（デコード失敗時の再出力用）
 }
 
 // NewRawVideoMKVWriter は新しいRawVideoMKVWriterを作成
@@ -141,13 +142,22 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 		}
 	}
 
+	// Calculate timecode in milliseconds (デコード失敗時の再出力にも必要)
+	relativeTS := timestamp - w.baseTimestamp
+	timecodeMs := uint64(relativeTS) * 1000 / 90000 // 90kHz to ms
+
 	// フレームをデコード
 	if err := vpx.Error(vpx.CodecDecode(w.ctx, string(data), uint32(len(data)), nil, 0)); err != nil {
 		// Debug: dump failed frame header
 		if len(data) >= 10 {
 			DebugLog("Decode failed (skipping): len=%d, header=%x, keyframe=%v\n", len(data), data[:10], keyframe)
 		}
-		// エラーが発生してもスキップして継続
+		// デコード失敗時、lastValidFrameがあれば再出力（画面フリーズ効果）
+		if len(w.lastValidFrame) > 0 && w.isHeaderWritten {
+			DebugLog("Using cached frame (freeze effect): timecode=%dms\n", timecodeMs)
+			return w.writeSimpleBlock(w.videoTrackNum, w.lastValidFrame, timecodeMs, false)
+		}
+		DebugLog("No cached frame available, skipping\n")
 		return nil
 	}
 
@@ -188,9 +198,11 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 	rgbaImg := img.ImageRGBA()
 	rgba := rgbaImg.Pix
 
-	// Calculate timecode in milliseconds
-	relativeTS := timestamp - w.baseTimestamp
-	timecodeMs := uint64(relativeTS) * 1000 / 90000 // 90kHz to ms
+	// 正常フレームをキャッシュ（デコード失敗時の再出力用）
+	if w.lastValidFrame == nil || len(w.lastValidFrame) != len(rgba) {
+		w.lastValidFrame = make([]byte, len(rgba))
+	}
+	copy(w.lastValidFrame, rgba)
 
 	// SimpleBlockとして書き込み
 	return w.writeSimpleBlock(w.videoTrackNum, rgba, timecodeMs, keyframe)
