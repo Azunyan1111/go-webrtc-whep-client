@@ -3,7 +3,7 @@ module github.com/Azunyan1111/go-webrtc-whep-client
 go 1.24.2
 
 require (
-	github.com/Azunyan1111/libvpx-go v0.2.0
+	github.com/Azunyan1111/libvpx-go v0.5.0
 	github.com/pion/interceptor v0.1.40
 	github.com/pion/rtp v1.8.21
 	github.com/pion/webrtc/v4 v4.1.4

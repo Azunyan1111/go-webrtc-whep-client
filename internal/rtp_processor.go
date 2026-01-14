@@ -10,6 +10,9 @@ type DefaultRTPProcessor struct {
 	firstTimestamp uint32
 	seenKeyFrame   bool
 	lastTimestamp  uint32
+	lastSequence   uint16 // 前回のシーケンス番号
+	hasSequence    bool   // シーケンス番号初期化フラグ
+	frameCorrupted bool   // 現在のフレームが破損しているか
 }
 
 // NewDefaultRTPProcessor は新しいRTPプロセッサを作成
@@ -43,6 +46,17 @@ func (p *DefaultRTPProcessor) processVP8Packet(packet *rtp.Packet) ([][]byte, er
 	if len(payload) < 1 {
 		return nil, nil
 	}
+
+	// シーケンス番号の連続性チェック
+	if p.hasSequence {
+		expectedSeq := (p.lastSequence + 1) & 0xFFFF
+		if packet.SequenceNumber != expectedSeq {
+			DebugLog("Sequence gap: expected %d, got %d\n", expectedSeq, packet.SequenceNumber)
+			p.frameCorrupted = true
+		}
+	}
+	p.lastSequence = packet.SequenceNumber
+	p.hasSequence = true
 
 	// タイムスタンプが変わった場合、前のフレームをリセット
 	if p.lastTimestamp != 0 && p.lastTimestamp != packet.Timestamp {
@@ -134,11 +148,19 @@ func (p *DefaultRTPProcessor) processVP8Packet(packet *rtp.Packet) ([][]byte, er
 	// Accumulate frame data
 	if isStart {
 		p.currentFrame = nil
+		p.frameCorrupted = false // 新フレーム開始でリセット
 	}
 	p.currentFrame = append(p.currentFrame, payloadData...)
 
 	// Return frame when marker bit is set
 	if packet.Marker && len(p.currentFrame) > 0 {
+		// 破損フレームは返さない
+		if p.frameCorrupted {
+			DebugLog("Dropping corrupted frame (VP8)\n")
+			p.currentFrame = nil
+			p.frameCorrupted = false
+			return nil, nil
+		}
 		frame := make([]byte, len(p.currentFrame))
 		copy(frame, p.currentFrame)
 		p.currentFrame = nil
@@ -155,6 +177,17 @@ func (p *DefaultRTPProcessor) processVP9Packet(packet *rtp.Packet) ([][]byte, er
 	if len(payload) < 1 {
 		return nil, nil
 	}
+
+	// シーケンス番号の連続性チェック
+	if p.hasSequence {
+		expectedSeq := (p.lastSequence + 1) & 0xFFFF
+		if packet.SequenceNumber != expectedSeq {
+			DebugLog("Sequence gap: expected %d, got %d\n", expectedSeq, packet.SequenceNumber)
+			p.frameCorrupted = true
+		}
+	}
+	p.lastSequence = packet.SequenceNumber
+	p.hasSequence = true
 
 	// タイムスタンプが変わった場合、前のフレームをリセット
 	if p.lastTimestamp != 0 && p.lastTimestamp != packet.Timestamp {
@@ -273,11 +306,19 @@ func (p *DefaultRTPProcessor) processVP9Packet(packet *rtp.Packet) ([][]byte, er
 	// Accumulate frame data
 	if isStart {
 		p.currentFrame = nil
+		p.frameCorrupted = false // 新フレーム開始でリセット
 	}
 	p.currentFrame = append(p.currentFrame, payloadData...)
 
 	// Return frame when we have end bit or marker
 	if (isEnd || packet.Marker) && len(p.currentFrame) > 0 {
+		// 破損フレームは返さない
+		if p.frameCorrupted {
+			DebugLog("Dropping corrupted frame (VP9)\n")
+			p.currentFrame = nil
+			p.frameCorrupted = false
+			return nil, nil
+		}
 		frame := make([]byte, len(p.currentFrame))
 		copy(frame, p.currentFrame)
 		p.currentFrame = nil
