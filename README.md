@@ -1,42 +1,54 @@
 # go-webrtc-whep-client
 
-A Go client that receives WebRTC streams via WHEP protocol and pipes Matroska (MKV) or raw video streams to ffplay for playback verification. Compatible with Cloudflare Stream and other WHEP-compliant servers.
+A Go client that receives VP8/VP9 WebRTC streams via WHEP protocol and outputs decoded rawvideo + Opus audio in MKV container to stdout. Compatible with Cloudflare Stream and other WHEP-compliant servers.
+
+## Features
+
+- Receive VP8/VP9 + Opus audio via WHEP protocol
+- Decode VP8/VP9 to RGBA using libvpx-go (v0.2.0)
+- Output MKV container with decoded rawvideo + Opus audio (passthrough) to stdout
 
 ## Installation
+
+### Build from source
+```bash
+go build -o go-webrtc-whep-client .
+```
 
 ### Using go install
 ```bash
 go install github.com/Azunyan1111/go-webrtc-whep-client@latest
 ```
 
-### Build from source
-```bash
-go build -o go-webrtc-whep-client main.go
-```
-
 ## Usage
 
 ```bash
-# Play Matroska (MKV) stream with muxed audio and video
-./go-webrtc-whep-client -u http://example.com/whep | ffplay -i -
+./go-webrtc-whep-client <WHEP_URL> [flags]
 
-# Play raw video stream (video only)
-./go-webrtc-whep-client -u http://example.com/whep --format rawvideo | ffplay -f h264 -i -
+Arguments:
+  WHEP_URL    WHEP server URL (required)
 
-# Play Cloudflare Stream video
-./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play | ffplay -i -
-
-# Check server codecs
-./go-webrtc-whep-client -u http://example.com/whep --list-codecs
+Flags:
+  -d, --debug    Enable debug logging
 ```
 
-## Options
+## Examples
 
-- `-u, --url`: WHEP server URL (default: http://localhost:8080/whep)
-- `-c, --codec`: Video codec (h264/vp8/vp9, default: h264)
-- `-f, --format`: Output format (mkv/rawvideo, default: mkv)
-- `-l, --list-codecs`: List server codecs
-- `-d, --debug`: Show debug logs
+```bash
+# Play stream with ffplay
+./go-webrtc-whep-client http://example.com/whep | ffplay -i -
+
+# Play with debug logging
+./go-webrtc-whep-client http://example.com/whep -d | ffplay -i -
+
+# Play Cloudflare Stream video
+./go-webrtc-whep-client https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play | ffplay -i -
+```
+
+## Supported Codecs
+
+- Video: VP8, VP9
+- Audio: Opus
 
 ## Compatibility
 
@@ -52,43 +64,55 @@ MIT
 
 # go-webrtc-whep-client
 
-WHEPプロトコルでWebRTCストリームを受信し、Matroska (MKV) もしくはrawvideoをffplayにパイプして再生確認ができるGoクライアント。Cloudflare Streamなどの WHEP対応サーバーで使用可能。
+WHEPプロトコルでVP8/VP9 WebRTCストリームを受信し、デコード済みrawvideo + Opus音声をMKVコンテナでstdoutに出力するGoクライアント。Cloudflare StreamなどのWHEP対応サーバーで使用可能。
+
+## 機能
+
+- WHEPプロトコルでVP8/VP9 + Opus音声を受信
+- VP8/VP9をlibvpx-go (v0.2.0)でRGBAにデコード
+- MKVコンテナにデコード済みrawvideo + Opus音声（パススルー）をmuxしてstdoutに出力
 
 ## インストール
+
+### ソースからビルド
+```bash
+go build -o go-webrtc-whep-client .
+```
 
 ### go installを使う方法
 ```bash
 go install github.com/Azunyan1111/go-webrtc-whep-client@latest
 ```
 
-### ソースからビルド
-```bash
-go build -o go-webrtc-whep-client main.go
-```
-
 ## 使い方
 
 ```bash
-# Matroska (MKV) で音声・映像を同時再生
-./go-webrtc-whep-client -u http://example.com/whep | ffplay -i -
+./go-webrtc-whep-client <WHEP_URL> [flags]
 
-# rawvideoで映像のみ出力
-./go-webrtc-whep-client -u http://example.com/whep --format rawvideo | ffplay -f h264 -i -
+引数:
+  WHEP_URL    WHEPサーバーURL（必須）
 
-# Cloudflare Streamのビデオを再生
-./go-webrtc-whep-client -u https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play | ffplay -i -
-
-# サーバーのコーデック確認
-./go-webrtc-whep-client -u http://example.com/whep --list-codecs
+フラグ:
+  -d, --debug    デバッグログ有効化
 ```
 
-## オプション
+## 使用例
 
-- `-u, --url`: WHEPサーバーURL (デフォルト: http://localhost:8080/whep)
-- `-c, --codec`: ビデオコーデック (h264/vp8/vp9、デフォルト: h264)
-- `-f, --format`: 出力形式 (mkv/rawvideo、デフォルト: mkv)
-- `-l, --list-codecs`: サーバーのコーデック一覧表示
-- `-d, --debug`: デバッグログ表示
+```bash
+# ffplayで再生
+./go-webrtc-whep-client http://example.com/whep | ffplay -i -
+
+# デバッグログ付きで再生
+./go-webrtc-whep-client http://example.com/whep -d | ffplay -i -
+
+# Cloudflare Streamのビデオを再生
+./go-webrtc-whep-client https://customer-{customer_id}.cloudflarestream.com/{video_id}/webRTC/play | ffplay -i -
+```
+
+## 対応コーデック
+
+- ビデオ: VP8, VP9
+- オーディオ: Opus
 
 ## 対応サービス
 
