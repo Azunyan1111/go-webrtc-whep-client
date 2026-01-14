@@ -14,15 +14,6 @@ func CreateMediaEngine(codec string) (*webrtc.MediaEngine, error) {
 
 	// Register video codec based on user selection
 	switch strings.ToLower(codec) {
-	case "h264":
-		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
-			RTPCodecCapability: webrtc.RTPCodecCapability{
-				MimeType: webrtc.MimeTypeH264, ClockRate: 90000,
-			},
-			PayloadType: 96,
-		}, webrtc.RTPCodecTypeVideo); err != nil {
-			return nil, err
-		}
 	case "vp8":
 		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
 			RTPCodecCapability: webrtc.RTPCodecCapability{
@@ -42,7 +33,7 @@ func CreateMediaEngine(codec string) (*webrtc.MediaEngine, error) {
 			return nil, err
 		}
 	default:
-		return nil, fmt.Errorf("unsupported video codec: %s (supported: h264, vp8, vp9)", codec)
+		return nil, fmt.Errorf("unsupported video codec: %s (supported: vp8, vp9)", codec)
 	}
 
 	// Register audio codec (Opus)
@@ -56,6 +47,53 @@ func CreateMediaEngine(codec string) (*webrtc.MediaEngine, error) {
 	}
 
 	return mediaEngine, nil
+}
+
+func CreateVP8VP9MediaEngine() (*webrtc.MediaEngine, error) {
+	mediaEngine := &webrtc.MediaEngine{}
+
+	// Register VP8
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeVP8, ClockRate: 90000,
+		},
+		PayloadType: 97,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, err
+	}
+
+	// Register VP9
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeVP9, ClockRate: 90000,
+		},
+		PayloadType: 98,
+	}, webrtc.RTPCodecTypeVideo); err != nil {
+		return nil, err
+	}
+
+	// Register audio codec (Opus)
+	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
+		},
+		PayloadType: 111,
+	}, webrtc.RTPCodecTypeAudio); err != nil {
+		return nil, err
+	}
+
+	return mediaEngine, nil
+}
+
+func MimeTypeToCodec(mimeType string) string {
+	switch mimeType {
+	case webrtc.MimeTypeVP8:
+		return "vp8"
+	case webrtc.MimeTypeVP9:
+		return "vp9"
+	default:
+		return ""
+	}
 }
 
 func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnection, error) {
@@ -106,7 +144,7 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 	var videoTrack *webrtc.TrackRemote
 	var audioTrack *webrtc.TrackRemote
 	var streamManager *StreamManager
-	outputFormat := OutputFormat
+	var codecType string
 
 	// Set handlers for incoming tracks
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
@@ -116,55 +154,29 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 		// Store tracks
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
 			videoTrack = track
+			codecType = MimeTypeToCodec(codec.MimeType)
 			fmt.Fprintf(os.Stderr, "Video track received: %s\n", codec.MimeType)
 		} else if track.Kind() == webrtc.RTPCodecTypeAudio {
 			audioTrack = track
 			fmt.Fprintf(os.Stderr, "Audio track received: %s\n", codec.MimeType)
 		}
 
-		// Initialize stream manager if not already done
-		if streamManager == nil {
+		// Initialize stream manager when both tracks are available
+		if streamManager == nil && videoTrack != nil && audioTrack != nil {
 			processor := NewDefaultRTPProcessor()
-			startStreamManager := func() {
-				go func() {
-					if err := streamManager.Run(); err != nil {
-						fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
-						os.Exit(1)
-					}
-				}()
-			}
 
-			switch outputFormat {
-			case OutputFormatRawVideo:
-				if videoTrack == nil {
-					fmt.Fprintln(os.Stderr, "Waiting for video track to start rawvideo output")
-					return
+			// Always use RawVideoMKVWriter
+			writer := NewRawVideoMKVWriter(os.Stdout, codecType)
+			streamManager = NewStreamManager(writer, processor)
+			streamManager.AddVideoTrack(videoTrack, codecType)
+			streamManager.AddAudioTrack(audioTrack)
+
+			go func() {
+				if err := streamManager.Run(); err != nil {
+					fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
+					os.Exit(1)
 				}
-				writer := NewRawVideoStreamWriter(os.Stdout, VideoCodec)
-				streamManager = NewStreamManager(writer, processor)
-				streamManager.AddVideoTrack(videoTrack, VideoCodec)
-				if audioTrack != nil {
-					streamManager.AddAudioTrack(audioTrack)
-				}
-				startStreamManager()
-			default:
-				if videoTrack == nil || audioTrack == nil {
-					fmt.Fprintln(os.Stderr, "Waiting for both audio and video tracks to start MKV output")
-					return
-				}
-				writer := NewWebMStreamWriter(os.Stdout, videoTrack, audioTrack)
-				streamManager = NewStreamManager(writer, processor)
-				streamManager.AddVideoTrack(videoTrack, VideoCodec)
-				streamManager.AddAudioTrack(audioTrack)
-				startStreamManager()
-			}
-		} else {
-			// Update existing stream manager with new track
-			if track.Kind() == webrtc.RTPCodecTypeVideo {
-				streamManager.AddVideoTrack(videoTrack, VideoCodec)
-			} else if track.Kind() == webrtc.RTPCodecTypeAudio {
-				streamManager.AddAudioTrack(audioTrack)
-			}
+			}()
 		}
 	})
 
@@ -178,41 +190,4 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 	})
 
 	return peerConnection, nil
-}
-
-func CreateAllCodecsMediaEngine() (*webrtc.MediaEngine, error) {
-	mediaEngine := &webrtc.MediaEngine{}
-
-	// Register all video codecs
-	videoCodecs := []struct {
-		mimeType    string
-		payloadType uint8
-	}{
-		{webrtc.MimeTypeH264, 96},
-		{webrtc.MimeTypeVP8, 97},
-		{webrtc.MimeTypeVP9, 98},
-	}
-
-	for _, codec := range videoCodecs {
-		if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
-			RTPCodecCapability: webrtc.RTPCodecCapability{
-				MimeType: codec.mimeType, ClockRate: 90000,
-			},
-			PayloadType: webrtc.PayloadType(codec.payloadType),
-		}, webrtc.RTPCodecTypeVideo); err != nil {
-			return nil, err
-		}
-	}
-
-	// Register audio codec
-	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
-		},
-		PayloadType: 111,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		return nil, err
-	}
-
-	return mediaEngine, nil
 }

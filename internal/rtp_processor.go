@@ -1,19 +1,15 @@
 package internal
 
 import (
-	"fmt"
-
 	"github.com/pion/rtp"
 )
 
 // DefaultRTPProcessor は標準的なRTPパケット処理を実装
 type DefaultRTPProcessor struct {
-	nalBuffer         []byte
-	currentFrame      []byte
-	firstTimestamp    uint32
-	seenKeyFrame      bool
-	h264FrameBuffer   []byte // H264フレーム全体を蓄積
-	lastH264Timestamp uint32
+	currentFrame   []byte
+	firstTimestamp uint32
+	seenKeyFrame   bool
+	lastTimestamp  uint32
 }
 
 // NewDefaultRTPProcessor は新しいRTPプロセッサを作成
@@ -28,8 +24,6 @@ func (p *DefaultRTPProcessor) ProcessRTPPacket(packet *rtp.Packet, codecType str
 	}
 
 	switch codecType {
-	case "h264":
-		return p.processH264Packet(packet)
 	case "vp8":
 		return p.processVP8Packet(packet)
 	case "vp9":
@@ -42,136 +36,99 @@ func (p *DefaultRTPProcessor) ProcessRTPPacket(packet *rtp.Packet, codecType str
 	}
 }
 
-// processH264Packet はH264 RTPパケットを処理
-func (p *DefaultRTPProcessor) processH264Packet(packet *rtp.Packet) ([][]byte, error) {
-	payload := packet.Payload
-	if len(payload) < 1 {
-		return nil, nil
-	}
-
-	// タイムスタンプが変わったら前のフレームを返す
-	if p.lastH264Timestamp != 0 && p.lastH264Timestamp != packet.Timestamp && len(p.h264FrameBuffer) > 0 {
-		frame := make([]byte, len(p.h264FrameBuffer))
-		copy(frame, p.h264FrameBuffer)
-		p.h264FrameBuffer = nil
-		p.lastH264Timestamp = packet.Timestamp
-		return [][]byte{frame}, nil
-	}
-	p.lastH264Timestamp = packet.Timestamp
-
-	nalType := payload[0] & 0x1F
-
-	switch {
-	case nalType >= 1 && nalType <= 23:
-		// Single NAL unit - スタートコード付きでバッファに追加
-		p.h264FrameBuffer = append(p.h264FrameBuffer, 0x00, 0x00, 0x00, 0x01)
-		p.h264FrameBuffer = append(p.h264FrameBuffer, payload...)
-
-	case nalType == 24:
-		// STAP-A - aggregate packet
-		if len(payload) > 1 {
-			offset := 1
-			for offset < len(payload)-2 {
-				nalSize := int(payload[offset])<<8 | int(payload[offset+1])
-				offset += 2
-				if offset+nalSize <= len(payload) {
-					// 各NALユニットにスタートコードを付けてバッファに追加
-					p.h264FrameBuffer = append(p.h264FrameBuffer, 0x00, 0x00, 0x00, 0x01)
-					p.h264FrameBuffer = append(p.h264FrameBuffer, payload[offset:offset+nalSize]...)
-					offset += nalSize
-				} else {
-					break
-				}
-			}
-		}
-
-	case nalType == 28:
-		// FU-A fragmentation
-		if len(payload) < 2 {
-			return nil, nil
-		}
-
-		fuHeader := payload[1]
-		isStart := (fuHeader & 0x80) != 0
-		isEnd := (fuHeader & 0x40) != 0
-
-		if isStart {
-			// Start of fragmented NAL
-			p.nalBuffer = nil
-			// スタートコードを追加
-			p.nalBuffer = append(p.nalBuffer, 0x00, 0x00, 0x00, 0x01)
-			// Reconstruct NAL header
-			nalHeader := (payload[0] & 0xE0) | (fuHeader & 0x1F)
-			p.nalBuffer = append(p.nalBuffer, nalHeader)
-		}
-
-		// Append fragment data
-		if len(payload) > 2 {
-			p.nalBuffer = append(p.nalBuffer, payload[2:]...)
-		}
-
-		if isEnd && len(p.nalBuffer) > 0 {
-			// End of fragmented NAL - バッファに追加
-			p.h264FrameBuffer = append(p.h264FrameBuffer, p.nalBuffer...)
-			p.nalBuffer = nil
-		}
-
-	default:
-		return nil, fmt.Errorf("unsupported H264 NAL type: %d", nalType)
-	}
-
-	// マーカービットがセットされている場合はフレーム終了
-	if packet.Marker && len(p.h264FrameBuffer) > 0 {
-		frame := make([]byte, len(p.h264FrameBuffer))
-		copy(frame, p.h264FrameBuffer)
-		p.h264FrameBuffer = nil
-		return [][]byte{frame}, nil
-	}
-
-	return nil, nil
-}
-
 // processVP8Packet はVP8 RTPパケットを処理
+// RFC 7741に基づくVP8ペイロードデスクリプタの解析
 func (p *DefaultRTPProcessor) processVP8Packet(packet *rtp.Packet) ([][]byte, error) {
 	payload := packet.Payload
 	if len(payload) < 1 {
 		return nil, nil
 	}
 
-	// Initialize timestamp on first packet
-	if p.firstTimestamp == 0 {
-		p.firstTimestamp = packet.Timestamp
+	// タイムスタンプが変わった場合、前のフレームをリセット
+	if p.lastTimestamp != 0 && p.lastTimestamp != packet.Timestamp {
+		// 新しいフレームが始まった
+		p.currentFrame = nil
 	}
+	p.lastTimestamp = packet.Timestamp
 
-	// VP8 payload descriptor
+	// VP8 payload descriptor parsing (RFC 7741)
+	// First byte:
+	//  X R N S R PID
+	//  X: Extension bit
+	//  R: Reserved
+	//  N: Non-reference frame
+	//  S: Start of VP8 partition
+	//  PID: Partition index (3 bits)
+
 	headerSize := 1
+	firstByte := payload[0]
 
-	// X bit check
-	if payload[0]&0x80 != 0 {
-		headerSize++
-		if len(payload) < headerSize {
+	// Check S bit for start of partition
+	isStart := (firstByte & 0x10) != 0
+
+	// X bit - extension present
+	if firstByte&0x80 != 0 {
+		if len(payload) < 2 {
 			return nil, nil
+		}
+		headerSize++
+		extByte := payload[1]
+
+		// I bit - PictureID present
+		if extByte&0x80 != 0 {
+			headerSize++
+			if len(payload) < headerSize {
+				return nil, nil
+			}
+			// M bit - PictureID is 16 bits
+			if payload[headerSize-1]&0x80 != 0 {
+				headerSize++
+			}
+		}
+
+		// L bit - TL0PICIDX present
+		if extByte&0x40 != 0 {
+			headerSize++
+		}
+
+		// T or K bit - TID/KEYIDX present
+		if extByte&0x20 != 0 || extByte&0x10 != 0 {
+			headerSize++
 		}
 	}
 
-	// Check S bit for start of partition
-	isStart := (payload[0] & 0x10) != 0
-
-	// Skip VP8 payload descriptor
 	if len(payload) <= headerSize {
 		return nil, nil
 	}
 
 	payloadData := payload[headerSize:]
 
-	// For VP8, check if this is a keyframe
-	if isStart && len(payloadData) >= 3 {
-		// VP8 bitstream - check P bit in first byte
-		isKeyFrame := (payloadData[0] & 0x01) == 0
-		if !p.seenKeyFrame && !isKeyFrame {
-			return nil, nil
+	// キーフレームチェック - VP8ビットストリームの最初のバイトで判定
+	// VP8 keyframe: bit 0 = 0 (P bit), and starts with sync code after frame tag
+	isKeyFrame := false
+	if isStart && len(payloadData) >= 10 {
+		// VP8 uncompressed data chunk starts with:
+		// - frame_tag (3 bytes): bit 0 is key_frame (0=key, 1=inter)
+		// - For keyframes: sync code (3 bytes): 0x9d 0x01 0x2a
+		frameTag := payloadData[0]
+		isKeyFrame = (frameTag & 0x01) == 0
+
+		if isKeyFrame {
+			// キーフレームの場合、sync codeを確認
+			if payloadData[3] == 0x9d && payloadData[4] == 0x01 && payloadData[5] == 0x2a {
+				DebugLog("VP8 keyframe detected: sync code OK\n")
+				p.seenKeyFrame = true
+			} else {
+				DebugLog("VP8 keyframe but no sync code: %x\n", payloadData[:10])
+				// sync codeがなくても、frame_tagがキーフレームを示していれば受け入れる
+				p.seenKeyFrame = true
+			}
 		}
-		p.seenKeyFrame = true
+	}
+
+	// キーフレームをまだ見ていない場合はスキップ
+	if !p.seenKeyFrame {
+		return nil, nil
 	}
 
 	// Accumulate frame data
@@ -192,61 +149,124 @@ func (p *DefaultRTPProcessor) processVP8Packet(packet *rtp.Packet) ([][]byte, er
 }
 
 // processVP9Packet はVP9 RTPパケットを処理
+// draft-ietf-payload-vp9に基づくVP9ペイロードデスクリプタの解析
 func (p *DefaultRTPProcessor) processVP9Packet(packet *rtp.Packet) ([][]byte, error) {
 	payload := packet.Payload
 	if len(payload) < 1 {
 		return nil, nil
 	}
 
-	// Initialize timestamp on first packet
-	if p.firstTimestamp == 0 {
-		p.firstTimestamp = packet.Timestamp
+	// タイムスタンプが変わった場合、前のフレームをリセット
+	if p.lastTimestamp != 0 && p.lastTimestamp != packet.Timestamp {
+		p.currentFrame = nil
 	}
+	p.lastTimestamp = packet.Timestamp
 
-	// VP9 payload descriptor
+	// VP9 payload descriptor parsing
+	// First byte:
+	//  I P L F B E V Z
+	//  I: Picture ID present
+	//  P: Inter-picture predicted layer frame
+	//  L: Layer indices present
+	//  F: Flexible mode
+	//  B: Start of frame
+	//  E: End of frame
+	//  V: Scalability structure present
+	//  Z: Not a reference frame for upper spatial layers
+
 	headerSize := 1
+	firstByte := payload[0]
 
-	// I bit check (extended picture ID)
-	if payload[0]&0x80 != 0 {
+	// B bit - beginning of frame
+	isStart := (firstByte & 0x08) != 0
+	// E bit - end of frame
+	isEnd := (firstByte & 0x04) != 0
+	// P bit - inter-picture predicted frame (0 = keyframe)
+	isInterFrame := (firstByte & 0x40) != 0
+
+	// I bit - Picture ID present
+	if firstByte&0x80 != 0 {
 		headerSize++
 		if len(payload) < headerSize {
 			return nil, nil
 		}
-		// M bit check (extended picture ID is 2 bytes)
-		if payload[1]&0x80 != 0 {
+		// M bit - Picture ID is 16 bits
+		if payload[headerSize-1]&0x80 != 0 {
 			headerSize++
 		}
 	}
 
-	// L bit check (TID/SLID present)
-	if payload[0]&0x40 != 0 {
+	// L bit - Layer indices present
+	if firstByte&0x20 != 0 {
 		headerSize++
+		if len(payload) < headerSize {
+			return nil, nil
+		}
+		// Check if TL0PICIDX is present (non-flexible mode)
+		if (firstByte & 0x10) == 0 {
+			headerSize++
+		}
 	}
 
-	// Check if we have flexible mode
-	if payload[0]&0x10 != 0 {
-		// F=1, flexible mode
-		headerSize++ // For TID/U/SID/D
+	// F bit - Flexible mode, reference indices present
+	if (firstByte&0x10) != 0 && isInterFrame {
+		// In flexible mode with P=1, we have reference indices
+		// Each P_DIFF is 1 byte, N bit indicates more follow
+		if len(payload) > headerSize {
+			for {
+				if len(payload) <= headerSize {
+					break
+				}
+				refByte := payload[headerSize]
+				headerSize++
+				// N bit - more reference indices follow
+				if refByte&0x01 == 0 {
+					break
+				}
+			}
+		}
 	}
 
-	if len(payload) < headerSize {
+	// V bit - Scalability structure present
+	if firstByte&0x02 != 0 {
+		if len(payload) <= headerSize {
+			return nil, nil
+		}
+		ssHeader := payload[headerSize]
+		headerSize++
+
+		nSpatial := ((ssHeader >> 5) & 0x07) + 1
+		yBit := (ssHeader & 0x10) != 0
+		gBit := (ssHeader & 0x08) != 0
+
+		if yBit {
+			headerSize += int(nSpatial) * 4 // WIDTH (2) + HEIGHT (2) per spatial layer
+		}
+
+		if gBit {
+			if len(payload) <= headerSize {
+				return nil, nil
+			}
+			nG := payload[headerSize]
+			headerSize++
+			headerSize += int(nG) * 3 // Each PG has 3 bytes
+		}
+	}
+
+	if len(payload) <= headerSize {
 		return nil, nil
 	}
 
-	// B bit - beginning of frame
-	isStart := (payload[0] & 0x08) != 0
-	// E bit - end of frame
-	isEnd := (payload[0] & 0x04) != 0
-	// P bit - inter-picture predicted frame
-	isInterFrame := (payload[0] & 0x01) != 0
-
-	// Skip VP9 payload descriptor
 	payloadData := payload[headerSize:]
 
-	// Check if keyframe
+	// Check if keyframe (P=0 means keyframe)
 	if isStart && !isInterFrame {
+		DebugLog("VP9 keyframe detected\n")
 		p.seenKeyFrame = true
-	} else if !p.seenKeyFrame {
+	}
+
+	// キーフレームをまだ見ていない場合はスキップ
+	if !p.seenKeyFrame {
 		return nil, nil
 	}
 

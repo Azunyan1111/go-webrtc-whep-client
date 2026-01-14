@@ -1,3 +1,5 @@
+github.com/Azunyan1111/libvpx-go v0.2.0 h1:rIZBvDMD/ENK2O6HDw5PMks8J6cl5GbXawEciq88bsE=
+github.com/Azunyan1111/libvpx-go v0.2.0/go.mod h1:qveWl+CCnAsHnmUaFGRKQE0MaXY7CKeOCRzHlB/aYtw=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=

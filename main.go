@@ -15,11 +15,10 @@ func main() {
 	internal.SetupUsage()
 	pflag.Parse()
 
-	if internal.ListCodecs {
-		if err := internal.ListServerCodecs(); err != nil {
-			log.Fatal(err)
-		}
-		os.Exit(0)
+	if err := internal.ParseArgs(); err != nil {
+		pflag.Usage()
+		fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
+		os.Exit(1)
 	}
 
 	if err := run(); err != nil {
@@ -28,16 +27,11 @@ func main() {
 }
 
 func run() error {
-	if err := internal.ValidateOutputFormat(); err != nil {
-		return err
-	}
-
 	fmt.Fprintf(os.Stderr, "Connecting to WHEP server: %s\n", internal.WhepURL)
-	fmt.Fprintf(os.Stderr, "Using video codec: %s\n", internal.VideoCodec)
-	fmt.Fprintf(os.Stderr, "Output format: %s\n", internal.OutputFormat)
+	fmt.Fprintln(os.Stderr, "Supported video codecs: VP8, VP9")
 
-	// Create MediaEngine with selected codec
-	mediaEngine, err := internal.CreateMediaEngine(internal.VideoCodec)
+	// Create MediaEngine with VP8/VP9
+	mediaEngine, err := internal.CreateVP8VP9MediaEngine()
 	if err != nil {
 		return err
 	}
@@ -59,13 +53,7 @@ func run() error {
 	}
 
 	fmt.Fprintln(os.Stderr, "Connected to WHEP server, receiving media...")
-
-	if internal.OutputFormat == internal.OutputFormatRawVideo {
-		fmt.Fprintln(os.Stderr, "Piping raw video stream to stdout")
-	} else {
-		fmt.Fprintln(os.Stderr, "Piping Matroska (MKV) stream with muxed audio/video to stdout")
-	}
-
+	fmt.Fprintln(os.Stderr, "Piping Matroska (MKV) stream with decoded rawvideo + Opus audio to stdout")
 	fmt.Fprintln(os.Stderr, "Press Ctrl+C to stop")
 
 	// Wait for interrupt signal

@@ -206,12 +206,6 @@ func (sm *StreamManager) isKeyframe(frame []byte, codecType string) bool {
 	}
 
 	switch codecType {
-	case "h264":
-		// H264のIDRフレームをチェック
-		if len(frame) > 0 {
-			nalType := frame[0] & 0x1F
-			return nalType == 5 // IDR
-		}
 	case "vp8":
 		// VP8のキーフレームをチェック
 		if len(frame) > 0 {
