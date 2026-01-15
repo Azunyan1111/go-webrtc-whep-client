@@ -72,7 +72,19 @@ type RawVideoMKVWriter struct {
 	running         chan struct{}
 	initialized     bool
 	decoderInit     bool
-	lastValidFrame  []byte // 最後に成功したRGBAフレームデータ（デコード失敗時の再出力用）
+	lastValidFrame  []byte          // 最後に成功したRGBAフレームデータ（デコード失敗時の再出力用）
+	frameValidator  *FrameValidator // フレーム品質検証器
+	validationStats ValidationStats // 検証統計情報
+}
+
+// ValidationStats は検証統計を保持
+type ValidationStats struct {
+	TotalFrames      int
+	ValidFrames      int
+	InvalidFrames    int
+	RepeatedFrames   int // lastValidFrameを再利用した回数
+	DecodeErrors     int
+	LastInvalidReason string
 }
 
 // NewRawVideoMKVWriter は新しいRawVideoMKVWriterを作成
@@ -121,6 +133,8 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
+	w.validationStats.TotalFrames++
+
 	// Initialize timestamp on first frame
 	if !w.hasFirstVideoTS {
 		w.firstVideoTS = timestamp
@@ -148,17 +162,13 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 
 	// フレームをデコード
 	if err := vpx.Error(vpx.CodecDecode(w.ctx, string(data), uint32(len(data)), nil, 0)); err != nil {
+		w.validationStats.DecodeErrors++
 		// Debug: dump failed frame header
 		if len(data) >= 10 {
 			DebugLog("Decode failed (skipping): len=%d, header=%x, keyframe=%v\n", len(data), data[:10], keyframe)
 		}
 		// デコード失敗時、lastValidFrameがあれば再出力（画面フリーズ効果）
-		if len(w.lastValidFrame) > 0 && w.isHeaderWritten {
-			DebugLog("Using cached frame (freeze effect): timecode=%dms\n", timecodeMs)
-			return w.writeSimpleBlock(w.videoTrackNum, w.lastValidFrame, timecodeMs, false)
-		}
-		DebugLog("No cached frame available, skipping\n")
-		return nil
+		return w.repeatLastValidFrame(timecodeMs, "decode error")
 	}
 
 	// デコードされた画像を取得
@@ -189,6 +199,9 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 		w.resolutionKnown = true
 		DebugLog("Resolution detected from keyframe: %dx%d\n", w.width, w.height)
 
+		// FrameValidatorを初期化
+		w.frameValidator = NewFrameValidator(w.width, w.height)
+
 		if err := w.writeHeaders(); err != nil {
 			return fmt.Errorf("failed to write headers: %w", err)
 		}
@@ -198,7 +211,27 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 	rgbaImg := img.ImageRGBA()
 	rgba := rgbaImg.Pix
 
-	// 正常フレームをキャッシュ（デコード失敗時の再出力用）
+	// フレーム品質検証（ノイズ/アーティファクト検出）
+	// --no-validate フラグで無効化可能
+	if w.frameValidator != nil && !NoFrameValidation {
+		result := w.frameValidator.ValidateFrame(rgba, keyframe)
+		if !result.IsValid {
+			w.validationStats.InvalidFrames++
+			w.validationStats.LastInvalidReason = result.Reason
+			DebugLog("Frame validation failed: %s (changed=%.2f%%, green=%.2f%%, hist=%.2f%%, block=%.2f%%)\n",
+				result.Reason,
+				result.ChangedPixelRatio*100,
+				result.GreenDominantRatio*100,
+				result.HistogramDiff*100,
+				result.BlockingScore*100)
+
+			// 破損フレーム検出時、lastValidFrameを再出力
+			return w.repeatLastValidFrame(timecodeMs, result.Reason)
+		}
+	}
+
+	// 検証成功：正常フレームをキャッシュ
+	w.validationStats.ValidFrames++
 	if w.lastValidFrame == nil || len(w.lastValidFrame) != len(rgba) {
 		w.lastValidFrame = make([]byte, len(rgba))
 	}
@@ -206,6 +239,24 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 
 	// SimpleBlockとして書き込み
 	return w.writeSimpleBlock(w.videoTrackNum, rgba, timecodeMs, keyframe)
+}
+
+// repeatLastValidFrame は最後の正常フレームを再出力する
+func (w *RawVideoMKVWriter) repeatLastValidFrame(timecodeMs uint64, reason string) error {
+	if len(w.lastValidFrame) > 0 && w.isHeaderWritten {
+		w.validationStats.RepeatedFrames++
+		DebugLog("Using cached frame (freeze effect) due to %s: timecode=%dms\n", reason, timecodeMs)
+		return w.writeSimpleBlock(w.videoTrackNum, w.lastValidFrame, timecodeMs, false)
+	}
+	DebugLog("No cached frame available, skipping (reason: %s)\n", reason)
+	return nil
+}
+
+// GetValidationStats は検証統計を返す
+func (w *RawVideoMKVWriter) GetValidationStats() ValidationStats {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.validationStats
 }
 
 // WriteAudioFrame はオーディオフレームを書き込む

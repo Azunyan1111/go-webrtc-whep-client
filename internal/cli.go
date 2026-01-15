@@ -8,13 +8,15 @@ import (
 )
 
 var (
-	WhepURL   string
-	WhipURL   string
-	DebugMode bool
+	WhepURL         string
+	WhipURL         string
+	DebugMode       bool
+	NoFrameValidation bool
 )
 
 func init() {
 	pflag.BoolVarP(&DebugMode, "debug", "d", false, "Enable debug logging")
+	pflag.BoolVar(&NoFrameValidation, "no-validate", false, "Disable frame validation (show raw packet loss artifacts)")
 }
 
 func SetupUsage() {
