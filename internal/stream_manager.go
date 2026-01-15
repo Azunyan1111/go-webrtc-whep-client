@@ -5,32 +5,113 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
+	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
 
 // StreamManager はストリーム処理を管理する統合クラス
 type StreamManager struct {
-	videoTrack *webrtc.TrackRemote
-	audioTrack *webrtc.TrackRemote
-	writer     StreamWriter
-	processor  RTPProcessor
-	codecType  string
-	done       chan struct{}
-	errChan    chan error
-	wg         sync.WaitGroup
-	closeOnce  sync.Once
-	mu         sync.Mutex
-	running    bool
+	videoTrack      *webrtc.TrackRemote
+	audioTrack      *webrtc.TrackRemote
+	writer          StreamWriter
+	processor       RTPProcessor
+	codecType       string
+	done            chan struct{}
+	errChan         chan error
+	wg              sync.WaitGroup
+	closeOnce       sync.Once
+	mu              sync.Mutex
+	running         bool
+	baseTimeout     time.Duration   // RTP読み取り基本タイムアウト（2秒）
+	maxTimeout      time.Duration   // RTP読み取り最大タイムアウト
+	timeoutStep     time.Duration   // タイムアウト増加ステップ（1秒）
+	currentTimeout  time.Duration   // 現在のタイムアウト値
+	mediaReceivedCh chan<- struct{} // 最初のメディア受信通知用
+	firstMediaSent  bool            // 通知済みフラグ
+}
+
+// rtpReadResult はReadRTPの結果を格納
+type rtpReadResult struct {
+	packet *rtp.Packet
+	attrs  interceptor.Attributes
+	err    error
 }
 
 // NewStreamManager は新しいストリームマネージャーを作成
-func NewStreamManager(writer StreamWriter, processor RTPProcessor) *StreamManager {
+// maxTimeout: 最大タイムアウト値（タイムアウトは2秒から開始し、1秒ずつ増加してこの値に達する）
+func NewStreamManager(writer StreamWriter, processor RTPProcessor, maxTimeout time.Duration, mediaReceivedCh chan<- struct{}) *StreamManager {
+	baseTimeout := 2 * time.Second
+	timeoutStep := 1 * time.Second
 	return &StreamManager{
-		writer:    writer,
-		processor: processor,
-		done:      make(chan struct{}),
-		errChan:   make(chan error, 2),
+		writer:          writer,
+		processor:       processor,
+		done:            make(chan struct{}),
+		errChan:         make(chan error, 2),
+		baseTimeout:     baseTimeout,
+		maxTimeout:      maxTimeout,
+		timeoutStep:     timeoutStep,
+		currentTimeout:  baseTimeout,
+		mediaReceivedCh: mediaReceivedCh,
+	}
+}
+
+// readRTPWithTimeout はタイムアウト付きでRTPパケットを読み取る
+// タイムアウトは2秒から開始し、タイムアウト発生ごとに1秒ずつ増加（最大maxTimeoutまで）
+// パケット受信成功時はタイムアウトを2秒にリセット
+func (sm *StreamManager) readRTPWithTimeout(track *webrtc.TrackRemote) (*rtp.Packet, interceptor.Attributes, error) {
+	if sm.maxTimeout <= 0 {
+		return track.ReadRTP()
+	}
+
+	resultChan := make(chan rtpReadResult, 1)
+
+	go func() {
+		packet, attrs, err := track.ReadRTP()
+		select {
+		case resultChan <- rtpReadResult{packet: packet, attrs: attrs, err: err}:
+		case <-sm.done:
+		}
+	}()
+
+	sm.mu.Lock()
+	timeout := sm.currentTimeout
+	sm.mu.Unlock()
+
+	select {
+	case <-sm.done:
+		return nil, nil, io.EOF
+	case result := <-resultChan:
+		// 成功時はタイムアウトをリセット
+		sm.mu.Lock()
+		sm.currentTimeout = sm.baseTimeout
+		sm.mu.Unlock()
+		return result.packet, result.attrs, result.err
+	case <-time.After(timeout):
+		// タイムアウト時は次回のタイムアウト値を増加
+		sm.mu.Lock()
+		sm.currentTimeout += sm.timeoutStep
+		if sm.currentTimeout > sm.maxTimeout {
+			sm.currentTimeout = sm.maxTimeout
+		}
+		sm.mu.Unlock()
+		return nil, nil, fmt.Errorf("RTP read timeout after %v", timeout)
+	}
+}
+
+// notifyMediaReceived は最初のメディア受信を通知する（1回のみ）
+func (sm *StreamManager) notifyMediaReceived() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if !sm.firstMediaSent && sm.mediaReceivedCh != nil {
+		select {
+		case sm.mediaReceivedCh <- struct{}{}:
+			sm.firstMediaSent = true
+		default:
+		}
 	}
 }
 
@@ -42,10 +123,15 @@ func (sm *StreamManager) AddVideoTrack(track *webrtc.TrackRemote, codecType stri
 	sm.videoTrack = track
 	sm.codecType = codecType
 
-	// 既に実行中の場合、新しいトラックの処理を開始
+	// 既に実行中かつ停止していない場合、新しいトラックの処理を開始
 	if sm.running && track != nil {
-		sm.wg.Add(1)
-		go sm.processVideoStream()
+		select {
+		case <-sm.done:
+			return
+		default:
+			sm.wg.Add(1)
+			go sm.processVideoStream()
+		}
 	}
 }
 
@@ -56,10 +142,15 @@ func (sm *StreamManager) AddAudioTrack(track *webrtc.TrackRemote) {
 
 	sm.audioTrack = track
 
-	// 既に実行中の場合、新しいトラックの処理を開始
+	// 既に実行中かつ停止していない場合、新しいトラックの処理を開始
 	if sm.running && track != nil {
-		sm.wg.Add(1)
-		go sm.processAudioStream()
+		select {
+		case <-sm.done:
+			return
+		default:
+			sm.wg.Add(1)
+			go sm.processAudioStream()
+		}
 	}
 }
 
@@ -75,8 +166,9 @@ func (sm *StreamManager) Run() error {
 	// WriterのRunメソッドがあれば実行
 	if runner, ok := sm.writer.(interface{ Run() error }); ok {
 		go func() {
-			if err := runner.Run(); err != nil {
-				sm.errChan <- err
+			select {
+			case sm.errChan <- runner.Run():
+			case <-sm.done:
 			}
 		}()
 	}
@@ -93,27 +185,28 @@ func (sm *StreamManager) Run() error {
 		go sm.processAudioStream()
 	}
 
-	// エラー監視
-	go func() {
-		sm.wg.Wait()
-		sm.closeOnce.Do(func() {
-			close(sm.errChan)
-		})
-	}()
-
-	// エラーをチェック
-	for err := range sm.errChan {
-		if err != nil {
-			return err
+	// エラー監視: doneチャネルかerrChanからのエラーを待つ
+	for {
+		select {
+		case <-sm.done:
+			return nil
+		case err := <-sm.errChan:
+			if err != nil {
+				return err
+			}
 		}
 	}
-
-	return nil
 }
 
 // Stop はストリーム処理を停止
 func (sm *StreamManager) Stop() error {
-	close(sm.done)
+	sm.mu.Lock()
+	sm.running = false
+	sm.mu.Unlock()
+
+	sm.closeOnce.Do(func() {
+		close(sm.done)
+	})
 	sm.wg.Wait()
 
 	if closer, ok := sm.writer.(io.Closer); ok {
@@ -134,19 +227,28 @@ func (sm *StreamManager) processVideoStream() {
 		default:
 		}
 
-		rtpPacket, _, err := sm.videoTrack.ReadRTP()
+		rtpPacket, _, err := sm.readRTPWithTimeout(sm.videoTrack)
 		if err != nil {
 			if err == io.EOF {
 				return
 			}
-			sm.errChan <- fmt.Errorf("error reading video RTP: %w", err)
+			select {
+			case sm.errChan <- fmt.Errorf("error reading video RTP: %w", err):
+			case <-sm.done:
+			}
 			return
 		}
+
+		// 最初のメディア受信を通知
+		sm.notifyMediaReceived()
 
 		// RTPパケットを処理
 		frames, err := sm.processor.ProcessRTPPacket(rtpPacket, sm.codecType)
 		if err != nil {
-			sm.errChan <- fmt.Errorf("error processing video RTP: %w", err)
+			select {
+			case sm.errChan <- fmt.Errorf("error processing video RTP: %w", err):
+			case <-sm.done:
+			}
 			return
 		}
 
@@ -154,7 +256,10 @@ func (sm *StreamManager) processVideoStream() {
 		for _, frame := range frames {
 			keyframe := sm.isKeyframe(frame, sm.codecType)
 			if err := sm.writer.WriteVideoFrame(frame, rtpPacket.Timestamp, keyframe); err != nil {
-				sm.errChan <- fmt.Errorf("error writing video frame: %w", err)
+				select {
+				case sm.errChan <- fmt.Errorf("error writing video frame: %w", err):
+				case <-sm.done:
+				}
 				return
 			}
 		}
@@ -173,26 +278,35 @@ func (sm *StreamManager) processAudioStream() {
 		default:
 		}
 
-		rtpPacket, _, err := sm.audioTrack.ReadRTP()
+		rtpPacket, _, err := sm.readRTPWithTimeout(sm.audioTrack)
 		if err != nil {
 			if err == io.EOF {
 				return
 			}
-			sm.errChan <- fmt.Errorf("error reading audio RTP: %w", err)
+			select {
+			case sm.errChan <- fmt.Errorf("error reading audio RTP: %w", err):
+			case <-sm.done:
+			}
 			return
 		}
 
 		// RTPパケットを処理（オーディオは通常opus）
 		frames, err := sm.processor.ProcessRTPPacket(rtpPacket, "opus")
 		if err != nil {
-			sm.errChan <- fmt.Errorf("error processing audio RTP: %w", err)
+			select {
+			case sm.errChan <- fmt.Errorf("error processing audio RTP: %w", err):
+			case <-sm.done:
+			}
 			return
 		}
 
 		// フレームを書き込み
 		for _, frame := range frames {
 			if err := sm.writer.WriteAudioFrame(frame, rtpPacket.Timestamp); err != nil {
-				sm.errChan <- fmt.Errorf("error writing audio frame: %w", err)
+				select {
+				case sm.errChan <- fmt.Errorf("error writing audio frame: %w", err):
+				case <-sm.done:
+				}
 				return
 			}
 		}

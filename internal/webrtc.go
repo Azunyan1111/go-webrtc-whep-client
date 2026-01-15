@@ -9,6 +9,22 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
+// ConnectionState は接続状態を表す
+type ConnectionState int
+
+const (
+	StateConnecting ConnectionState = iota
+	StateConnected
+	StateDisconnected
+	StateFailed
+)
+
+// ConnectionEvent は接続イベントを通知する構造体
+type ConnectionEvent struct {
+	State ConnectionState
+	Error error
+}
+
 func CreateMediaEngine(codec string) (*webrtc.MediaEngine, error) {
 	mediaEngine := &webrtc.MediaEngine{}
 
@@ -96,7 +112,7 @@ func MimeTypeToCodec(mimeType string) string {
 	}
 }
 
-func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnection, error) {
+func CreatePeerConnection(mediaEngine *webrtc.MediaEngine, eventChan chan<- ConnectionEvent, streamManager *StreamManager) (*webrtc.PeerConnection, error) {
 	// Create an InterceptorRegistry
 	interceptorRegistry := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); err != nil {
@@ -140,52 +156,42 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine) (*webrtc.PeerConnecti
 		return nil, err
 	}
 
-	// Track storage for muxing
-	var videoTrack *webrtc.TrackRemote
-	var audioTrack *webrtc.TrackRemote
-	var streamManager *StreamManager
-	var codecType string
-
 	// Set handlers for incoming tracks
 	peerConnection.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
 		codec := track.Codec()
 		DebugLog("Track received - Type: %s, Codec: %s\n", track.Kind(), codec.MimeType)
 
-		// Store tracks
 		if track.Kind() == webrtc.RTPCodecTypeVideo {
-			videoTrack = track
-			codecType = MimeTypeToCodec(codec.MimeType)
+			codecType := MimeTypeToCodec(codec.MimeType)
 			fmt.Fprintf(os.Stderr, "Video track received: %s\n", codec.MimeType)
+			streamManager.AddVideoTrack(track, codecType)
 		} else if track.Kind() == webrtc.RTPCodecTypeAudio {
-			audioTrack = track
 			fmt.Fprintf(os.Stderr, "Audio track received: %s\n", codec.MimeType)
-		}
-
-		// Initialize stream manager when both tracks are available
-		if streamManager == nil && videoTrack != nil && audioTrack != nil {
-			processor := NewDefaultRTPProcessor()
-
-			// Always use RawVideoMKVWriter
-			writer := NewRawVideoMKVWriter(os.Stdout, codecType)
-			streamManager = NewStreamManager(writer, processor)
-			streamManager.AddVideoTrack(videoTrack, codecType)
-			streamManager.AddAudioTrack(audioTrack)
-
-			go func() {
-				if err := streamManager.Run(); err != nil {
-					fmt.Fprintf(os.Stderr, "Stream manager error: %v\n", err)
-					os.Exit(1)
-				}
-			}()
+			streamManager.AddAudioTrack(track)
 		}
 	})
 
 	// Set ICE connection state handler
 	peerConnection.OnICEConnectionStateChange(func(connectionState webrtc.ICEConnectionState) {
 		DebugLog("ICE Connection State has changed: %s\n", connectionState.String())
-		if connectionState == webrtc.ICEConnectionStateFailed {
+
+		switch connectionState {
+		case webrtc.ICEConnectionStateConnected:
+			select {
+			case eventChan <- ConnectionEvent{State: StateConnected}:
+			default:
+			}
+		case webrtc.ICEConnectionStateFailed:
 			fmt.Fprintln(os.Stderr, "ICE Connection Failed")
-			os.Exit(1)
+			select {
+			case eventChan <- ConnectionEvent{State: StateFailed, Error: fmt.Errorf("ICE connection failed")}:
+			default:
+			}
+		case webrtc.ICEConnectionStateDisconnected:
+			select {
+			case eventChan <- ConnectionEvent{State: StateDisconnected}:
+			default:
+			}
 		}
 	})
 

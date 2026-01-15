@@ -21,6 +21,15 @@ Compatible with Cloudflare Stream and other WHEP/WHIP-compliant servers.
 
 ## Installation
 
+### Using go install
+```bash
+# Install WHEP client
+go install github.com/Azunyan1111/go-webrtc-whep-client/cmd/whep-go@latest
+
+# Install WHIP client
+go install github.com/Azunyan1111/go-webrtc-whep-client/cmd/whip-go@latest
+```
+
 ### Build from source
 ```bash
 # Build WHEP client
@@ -123,6 +132,15 @@ Cloudflare StreamなどのWHEP/WHIP対応サーバーで使用可能。
 - WHIPプロトコルでVP8 + Opusを送信
 
 ## インストール
+
+### go installを使う
+```bash
+# WHEPクライアントをインストール
+go install github.com/Azunyan1111/go-webrtc-whep-client/cmd/whep-go@latest
+
+# WHIPクライアントをインストール
+go install github.com/Azunyan1111/go-webrtc-whep-client/cmd/whip-go@latest
+```
 
 ### ソースからビルド
 ```bash
