@@ -1,6 +1,7 @@
 .serena/
 .idea/
 .CLAUDE.md
+CLAUDE.md
 go-webrtc-whep-client
 whep-go
 whip-go

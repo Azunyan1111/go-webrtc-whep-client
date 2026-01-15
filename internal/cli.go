@@ -9,6 +9,7 @@ import (
 
 var (
 	WhepURL   string
+	WhipURL   string
 	DebugMode bool
 )
 
@@ -37,5 +38,31 @@ func ParseArgs() error {
 		return fmt.Errorf("WHEP_URL is required")
 	}
 	WhepURL = args[0]
+	return nil
+}
+
+func SetupWhipUsage() {
+	pflag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "WHIP Native Client - Send WebRTC streams via WHIP protocol\n\n")
+		fmt.Fprintf(os.Stderr, "Usage:\n")
+		fmt.Fprintf(os.Stderr, "  %s <WHIP_URL> [flags]\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Arguments:\n")
+		fmt.Fprintf(os.Stderr, "  WHIP_URL    WHIP server URL (required)\n\n")
+		fmt.Fprintf(os.Stderr, "Input:\n")
+		fmt.Fprintf(os.Stderr, "  stdin       MKV stream with rawvideo (RGBA) + Opus audio\n\n")
+		fmt.Fprintf(os.Stderr, "Examples:\n")
+		fmt.Fprintf(os.Stderr, "  cat video.mkv | %s http://example.com/whip\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  whep-go http://in.example.com/whep | %s http://out.example.com/whip\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "Flags:\n")
+		pflag.PrintDefaults()
+	}
+}
+
+func ParseWhipArgs() error {
+	args := pflag.Args()
+	if len(args) < 1 {
+		return fmt.Errorf("WHIP_URL is required")
+	}
+	WhipURL = args[0]
 	return nil
 }
