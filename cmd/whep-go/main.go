@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	maxReconnectAttempts = 10              // 最大再接続試行回数
-	reconnectInterval    = 5 * time.Second // 再接続間隔（固定）
-	mediaTimeout         = 5 * time.Second // メディア受信タイムアウト
+	maxReconnectAttempts = 10               // 最大再接続試行回数
+	reconnectInterval    = 5 * time.Second  // 再接続間隔（固定）
+	mediaTimeout         = 5 * time.Second  // メディア受信タイムアウト
 	connectionTimeout    = 10 * time.Second // ICE接続タイムアウト
 )
 

@@ -1,4 +1,5 @@
-package internal
+// Package mkvwriter provides MKV output for decoded video/audio frames
+package mkvwriter
 
 import (
 	"bufio"
@@ -10,7 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/Azunyan1111/libvpx-go/vpx"
+	"github.com/Azunyan1111/go-webrtc-whep-client/internal/libwebrtc"
 )
 
 // Matroska (MKV) EBML IDs
@@ -42,259 +43,164 @@ const (
 	channels          = 0x9F
 	colourSpace       = 0x2EB524
 	bitsPerChannel    = 0x55B2
+	bitDepth          = 0x6264
 
 	// Track types
 	trackTypeVideo = 0x01
 	trackTypeAudio = 0x02
 )
 
-// RawVideoMKVWriter はVP8/VP9をデコードしてrawvideoとしてMKVに出力するライター
-type RawVideoMKVWriter struct {
+// DebugLog is a placeholder for debug logging
+var DebugLog = func(format string, args ...interface{}) {}
+
+// DecodedMKVWriter outputs decoded RGBA video and PCM audio to MKV format
+type DecodedMKVWriter struct {
 	writer          io.Writer
 	bufWriter       *bufio.Writer
-	ctx             *vpx.CodecCtx
-	codecType       string
 	width           int
 	height          int
+	sampleRate      int
+	audioChannels   int
 	resolutionKnown bool
 	isHeaderWritten bool
 	videoTrackNum   uint64
 	audioTrackNum   uint64
 	clusterTime     uint64
-	baseTimestamp   uint32
-	hasBaseTS       bool
-	firstVideoTS    uint32
-	hasFirstVideoTS bool
-	firstAudioTS    uint32
-	hasFirstAudioTS bool
-	mutex           sync.Mutex
-	done            chan struct{}
-	running         chan struct{}
-	initialized     bool
-	decoderInit     bool
-	lastValidFrame  []byte          // 最後に成功したRGBAフレームデータ（デコード失敗時の再出力用）
-	frameValidator  *FrameValidator // フレーム品質検証器
-	validationStats ValidationStats // 検証統計情報
+	// Separate base timestamps for video and audio
+	videoBaseTs  int64
+	audioBaseTs  int64
+	hasVideoBase bool
+	hasAudioBase bool
+	// Wall clock time for synchronization
+	startWallTime int64
+	mutex         sync.Mutex
+	done          chan struct{}
+	running       chan struct{}
+	initialized   bool
 }
 
-// ValidationStats は検証統計を保持
-type ValidationStats struct {
-	TotalFrames       int
-	ValidFrames       int
-	InvalidFrames     int
-	RepeatedFrames    int // lastValidFrameを再利用した回数
-	DecodeErrors      int
-	LastInvalidReason string
-}
-
-// NewRawVideoMKVWriter は新しいRawVideoMKVWriterを作成
-func NewRawVideoMKVWriter(w io.Writer, codecType string) *RawVideoMKVWriter {
+// NewDecodedMKVWriter creates a new DecodedMKVWriter
+func NewDecodedMKVWriter(w io.Writer) *DecodedMKVWriter {
 	bufWriter := bufio.NewWriterSize(w, 64*1024) // 64KB buffer
-	return &RawVideoMKVWriter{
+	return &DecodedMKVWriter{
 		writer:        bufWriter,
 		bufWriter:     bufWriter,
-		codecType:     codecType,
 		videoTrackNum: 1,
 		audioTrackNum: 2,
+		sampleRate:    48000, // default
+		audioChannels: 2,     // default stereo
 		done:          make(chan struct{}),
 		running:       make(chan struct{}),
 	}
 }
 
-// initDecoder はデコーダーを初期化
-func (w *RawVideoMKVWriter) initDecoder() error {
-	var iface *vpx.CodecIface
-	switch w.codecType {
-	case "vp8":
-		iface = vpx.DecoderIfaceVP8()
-	case "vp9":
-		iface = vpx.DecoderIfaceVP9()
-	default:
-		return fmt.Errorf("unsupported codec type: %s", w.codecType)
-	}
-
-	w.ctx = vpx.NewCodecCtx()
-	if err := vpx.Error(vpx.CodecDecInitVer(w.ctx, iface, nil, 0, vpx.DecoderABIVersion)); err != nil {
-		return fmt.Errorf("failed to initialize VPX decoder: %w", err)
-	}
-	w.decoderInit = true
-	return nil
-}
-
-// WriteVideoFrame はビデオフレームをデコードして書き込む
-func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyframe bool) error {
-	if len(data) == 0 {
+// WriteVideoFrame writes a decoded video frame (I420 format from libwebrtc)
+func (w *DecodedMKVWriter) WriteVideoFrame(frame *libwebrtc.VideoFrame) error {
+	if frame == nil {
 		return nil
 	}
 
-	// 初期化を待つ
+	// Wait for initialization
 	<-w.running
 
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	w.validationStats.TotalFrames++
-
-	// Initialize timestamp on first frame
-	if !w.hasFirstVideoTS {
-		w.firstVideoTS = timestamp
-		w.hasFirstVideoTS = true
-		if !w.hasBaseTS {
-			w.baseTimestamp = timestamp
-			w.hasBaseTS = true
-		}
-		// Debug: dump first frame header
-		if len(data) >= 10 {
-			DebugLog("First frame: len=%d, header=%x, keyframe=%v\n", len(data), data[:10], keyframe)
-		}
-	}
-
-	// デコーダーがまだ初期化されていない場合
-	if !w.decoderInit {
-		if err := w.initDecoder(); err != nil {
-			return err
-		}
-	}
-
-	// Calculate timecode in milliseconds (デコード失敗時の再出力にも必要)
-	relativeTS := timestamp - w.baseTimestamp
-	timecodeMs := uint64(relativeTS) * 1000 / 90000 // 90kHz to ms
-
-	// フレームをデコード
-	if err := vpx.Error(vpx.CodecDecode(w.ctx, string(data), uint32(len(data)), nil, 0)); err != nil {
-		w.validationStats.DecodeErrors++
-		// Debug: dump failed frame header
-		if len(data) >= 10 {
-			DebugLog("Decode failed (skipping): len=%d, header=%x, keyframe=%v\n", len(data), data[:10], keyframe)
-		}
-		// デコード失敗時、lastValidFrameがあれば再出力（画面フリーズ効果）
-		return w.repeatLastValidFrame(timecodeMs, "decode error")
-	}
-
-	// デコードされた画像を取得
-	var iter vpx.CodecIter
-	img := vpx.CodecGetFrame(w.ctx, &iter)
-	if img == nil {
-		return nil // フレームがまだ準備できていない
-	}
-	img.Deref()
-
-	// 解像度が未知の場合、十分な解像度のキーフレームを待ってから確定しヘッダーを書き込む
-	// サーバーが最初に低解像度のプレビューキーフレームを送ることがあるため
-	frameWidth := int(img.DW)
-	frameHeight := int(img.DH)
-
+	// Detect resolution from first frame
 	if !w.resolutionKnown {
-		if !keyframe {
-			DebugLog("Waiting for keyframe to determine resolution\n")
+		// Skip low-resolution preview frames
+		if frame.Width < 640 || frame.Height < 360 {
+			DebugLog("Skipping low-resolution frame: %dx%d (waiting for >= 640x360)\n", frame.Width, frame.Height)
 			return nil
 		}
-		// 360p未満の解像度は低解像度プレビューとみなしてスキップ
-		if frameWidth < 640 || frameHeight < 360 {
-			DebugLog("Skipping low-resolution keyframe: %dx%d (waiting for >= 640x360)\n", frameWidth, frameHeight)
-			return nil
-		}
-		w.width = frameWidth
-		w.height = frameHeight
+		w.width = frame.Width
+		w.height = frame.Height
 		w.resolutionKnown = true
-		DebugLog("Resolution detected from keyframe: %dx%d\n", w.width, w.height)
-
-		// FrameValidatorを初期化
-		w.frameValidator = NewFrameValidator(w.width, w.height)
+		DebugLog("Resolution detected: %dx%d\n", w.width, w.height)
 
 		if err := w.writeHeaders(); err != nil {
 			return fmt.Errorf("failed to write headers: %w", err)
 		}
 	}
 
-	// YUV420からRGBAに変換（ImageRGBAメソッドを使用）
-	rgbaImg := img.ImageRGBA()
-	rgba := rgbaImg.Pix
-
-	// フレーム品質検証（ノイズ/アーティファクト検出）
-	// --no-validate フラグで無効化可能
-	if w.frameValidator != nil && !NoFrameValidation {
-		result := w.frameValidator.ValidateFrame(rgba, keyframe)
-		if !result.IsValid {
-			w.validationStats.InvalidFrames++
-			w.validationStats.LastInvalidReason = result.Reason
-			DebugLog("Frame validation failed: %s (changed=%.2f%%, green=%.2f%%, hist=%.2f%%, block=%.2f%%)\n",
-				result.Reason,
-				result.ChangedPixelRatio*100,
-				result.GreenDominantRatio*100,
-				result.HistogramDiff*100,
-				result.BlockingScore*100)
-
-			// 破損フレーム検出時、lastValidFrameを再出力
-			return w.repeatLastValidFrame(timecodeMs, result.Reason)
+	// Initialize base timestamp and wall clock time
+	if !w.hasVideoBase {
+		w.videoBaseTs = frame.TimestampUs
+		w.hasVideoBase = true
+		// Use wall clock for synchronization if this is the first frame
+		if w.startWallTime == 0 {
+			w.startWallTime = time.Now().UnixMicro()
 		}
+		DebugLog("Base video timestamp: %d us, wall time: %d us\n", w.videoBaseTs, w.startWallTime)
 	}
 
-	// 検証成功：正常フレームをキャッシュ
-	w.validationStats.ValidFrames++
-	if w.lastValidFrame == nil || len(w.lastValidFrame) != len(rgba) {
-		w.lastValidFrame = make([]byte, len(rgba))
-	}
-	copy(w.lastValidFrame, rgba)
+	// Calculate timecode in milliseconds using wall clock time for sync
+	// This ensures playback at correct speed regardless of source timestamps
+	wallElapsed := time.Now().UnixMicro() - w.startWallTime
+	timecodeMs := uint64(wallElapsed / 1000)
 
-	// SimpleBlockとして書き込み
-	return w.writeSimpleBlock(w.videoTrackNum, rgba, timecodeMs, keyframe)
-}
-
-// repeatLastValidFrame は最後の正常フレームを再出力する
-func (w *RawVideoMKVWriter) repeatLastValidFrame(timecodeMs uint64, reason string) error {
-	if len(w.lastValidFrame) > 0 && w.isHeaderWritten {
-		w.validationStats.RepeatedFrames++
-		DebugLog("Using cached frame (freeze effect) due to %s: timecode=%dms\n", reason, timecodeMs)
-		return w.writeSimpleBlock(w.videoTrackNum, w.lastValidFrame, timecodeMs, false)
-	}
-	DebugLog("No cached frame available, skipping (reason: %s)\n", reason)
-	return nil
-}
-
-// GetValidationStats は検証統計を返す
-func (w *RawVideoMKVWriter) GetValidationStats() ValidationStats {
-	w.mutex.Lock()
-	defer w.mutex.Unlock()
-	return w.validationStats
-}
-
-// WriteAudioFrame はオーディオフレームを書き込む
-func (w *RawVideoMKVWriter) WriteAudioFrame(data []byte, timestamp uint32) error {
-	if len(data) == 0 {
+	// Convert I420 to RGBA
+	rgba, err := libwebrtc.I420ToRGBA(frame)
+	if err != nil {
+		DebugLog("I420 to RGBA conversion failed: %v\n", err)
 		return nil
 	}
 
-	// 初期化を待つ
+	// Determine if this is a keyframe (for MKV we can treat all RGBA frames as keyframes)
+	keyframe := true
+
+	return w.writeSimpleBlock(w.videoTrackNum, rgba, timecodeMs, keyframe)
+}
+
+// WriteAudioFrame writes a decoded audio frame (PCM from libwebrtc)
+func (w *DecodedMKVWriter) WriteAudioFrame(frame *libwebrtc.AudioFrame) error {
+	if frame == nil || len(frame.PCM) == 0 {
+		return nil
+	}
+
+	// Wait for initialization
 	<-w.running
 
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	// ヘッダーがまだ書き込まれていない場合はスキップ
+	// Skip if header not written yet
 	if !w.isHeaderWritten {
 		return nil
 	}
 
-	// Initialize timestamp on first frame
-	if !w.hasFirstAudioTS {
-		w.firstAudioTS = timestamp
-		w.hasFirstAudioTS = true
-		if !w.hasBaseTS {
-			w.baseTimestamp = timestamp
-			w.hasBaseTS = true
-		}
+	// Update audio parameters if different
+	if frame.SampleRate != w.sampleRate || frame.Channels != w.audioChannels {
+		w.sampleRate = frame.SampleRate
+		w.audioChannels = frame.Channels
 	}
 
-	// Calculate timecode in milliseconds
-	relativeTS := timestamp - w.baseTimestamp
-	timecodeMs := uint64(relativeTS) * 1000 / 48000 // 48kHz to ms
+	// Initialize base timestamp and wall clock time
+	if !w.hasAudioBase {
+		w.audioBaseTs = frame.TimestampUs
+		w.hasAudioBase = true
+		// Use wall clock for synchronization if this is the first frame
+		if w.startWallTime == 0 {
+			w.startWallTime = time.Now().UnixMicro()
+		}
+		DebugLog("Base audio timestamp: %d us, wall time: %d us\n", w.audioBaseTs, w.startWallTime)
+	}
+
+	// Calculate timecode in milliseconds using wall clock time for sync
+	wallElapsed := time.Now().UnixMicro() - w.startWallTime
+	timecodeMs := uint64(wallElapsed / 1000)
+
+	// Convert int16 PCM to bytes (little-endian)
+	data := make([]byte, len(frame.PCM)*2)
+	for i, sample := range frame.PCM {
+		binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
+	}
 
 	return w.writeSimpleBlock(w.audioTrackNum, data, timecodeMs, false)
 }
 
-// Run はメインループを実行
-func (w *RawVideoMKVWriter) Run() error {
+// Run starts the main loop
+func (w *DecodedMKVWriter) Run() error {
 	w.mutex.Lock()
 	w.initialized = true
 	w.mutex.Unlock()
@@ -311,8 +217,8 @@ func (w *RawVideoMKVWriter) Run() error {
 	return nil
 }
 
-// Close はリソースをクリーンアップ
-func (w *RawVideoMKVWriter) Close() error {
+// Close cleans up resources
+func (w *DecodedMKVWriter) Close() error {
 	select {
 	case <-w.done:
 		// Already stopped
@@ -325,20 +231,14 @@ func (w *RawVideoMKVWriter) Close() error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	if w.decoderInit && w.ctx != nil {
-		vpx.CodecDestroy(w.ctx)
-		w.ctx = nil
-		w.decoderInit = false
-	}
-
 	if w.isHeaderWritten {
 		return w.bufWriter.Flush()
 	}
 	return nil
 }
 
-// writeHeaders はEBML/MKVヘッダーを書き込む
-func (w *RawVideoMKVWriter) writeHeaders() error {
+// writeHeaders writes EBML/MKV headers
+func (w *DecodedMKVWriter) writeHeaders() error {
 	// Write EBML header
 	if err := w.writeEBMLHeader(); err != nil {
 		return fmt.Errorf("failed to write EBML header: %w", err)
@@ -368,7 +268,7 @@ func (w *RawVideoMKVWriter) writeHeaders() error {
 	return nil
 }
 
-func (w *RawVideoMKVWriter) writeEBMLHeader() error {
+func (w *DecodedMKVWriter) writeEBMLHeader() error {
 	header := []byte{
 		0x1A, 0x45, 0xDF, 0xA3, // EBML
 		0x9F,                   // size (31 bytes)
@@ -384,13 +284,13 @@ func (w *RawVideoMKVWriter) writeEBMLHeader() error {
 	return err
 }
 
-func (w *RawVideoMKVWriter) writeSegmentHeader() error {
+func (w *DecodedMKVWriter) writeSegmentHeader() error {
 	// Segment with unknown size (0x01FFFFFFFFFFFFFF)
 	_, err := w.writer.Write([]byte{0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
 	return err
 }
 
-func (w *RawVideoMKVWriter) writeInfo() error {
+func (w *DecodedMKVWriter) writeInfo() error {
 	infoData := &bytes.Buffer{}
 
 	// TimecodeScale (1ms = 1000000ns)
@@ -399,12 +299,12 @@ func (w *RawVideoMKVWriter) writeInfo() error {
 	}
 
 	// MuxingApp
-	if err := w.writeEBMLElement(infoData, muxingApp, []byte("go-webrtc-whep-client")); err != nil {
+	if err := w.writeEBMLElement(infoData, muxingApp, []byte("go-webrtc-whep-client-libwebrtc")); err != nil {
 		return err
 	}
 
 	// WritingApp
-	if err := w.writeEBMLElement(infoData, writingApp, []byte("go-webrtc-whep-client")); err != nil {
+	if err := w.writeEBMLElement(infoData, writingApp, []byte("go-webrtc-whep-client-libwebrtc")); err != nil {
 		return err
 	}
 
@@ -412,7 +312,7 @@ func (w *RawVideoMKVWriter) writeInfo() error {
 	return w.writeEBMLElement(w.writer, info, infoData.Bytes())
 }
 
-func (w *RawVideoMKVWriter) writeTracks() error {
+func (w *DecodedMKVWriter) writeTracks() error {
 	tracksData := &bytes.Buffer{}
 
 	// Video track - V_UNCOMPRESSED (RGBA)
@@ -454,7 +354,7 @@ func (w *RawVideoMKVWriter) writeTracks() error {
 		return err
 	}
 
-	// Audio track - A_OPUS
+	// Audio track - A_PCM/INT/LIT (PCM signed 16-bit little-endian)
 	audioEntry := &bytes.Buffer{}
 	if err := w.writeEBMLElement(audioEntry, trackNumber, w.encodeUInt(w.audioTrackNum)); err != nil {
 		return err
@@ -465,16 +365,20 @@ func (w *RawVideoMKVWriter) writeTracks() error {
 	if err := w.writeEBMLElement(audioEntry, trackType, []byte{trackTypeAudio}); err != nil {
 		return err
 	}
-	if err := w.writeEBMLElement(audioEntry, codecID, []byte("A_OPUS")); err != nil {
+	if err := w.writeEBMLElement(audioEntry, codecID, []byte("A_PCM/INT/LIT")); err != nil {
 		return err
 	}
 
 	// Audio element
 	audioSettings := &bytes.Buffer{}
-	if err := w.writeEBMLElement(audioSettings, samplingFrequency, w.encodeFloat(48000)); err != nil {
+	if err := w.writeEBMLElement(audioSettings, samplingFrequency, w.encodeFloat(float64(w.sampleRate))); err != nil {
 		return err
 	}
-	if err := w.writeEBMLElement(audioSettings, channels, w.encodeUInt(2)); err != nil {
+	if err := w.writeEBMLElement(audioSettings, channels, w.encodeUInt(uint64(w.audioChannels))); err != nil {
+		return err
+	}
+	// BitDepth - 16 bits per sample
+	if err := w.writeEBMLElement(audioSettings, bitDepth, w.encodeUInt(16)); err != nil {
 		return err
 	}
 	if err := w.writeEBMLElement(audioEntry, audio, audioSettings.Bytes()); err != nil {
@@ -489,7 +393,7 @@ func (w *RawVideoMKVWriter) writeTracks() error {
 	return w.writeEBMLElement(w.writer, tracks, tracksData.Bytes())
 }
 
-func (w *RawVideoMKVWriter) writeSimpleBlock(trackNum uint64, data []byte, timecodeMs uint64, keyframe bool) error {
+func (w *DecodedMKVWriter) writeSimpleBlock(trackNum uint64, data []byte, timecodeMs uint64, keyframe bool) error {
 	// Start new cluster on keyframe or every second
 	needNewCluster := false
 	if keyframe && trackNum == w.videoTrackNum {
@@ -546,7 +450,7 @@ func (w *RawVideoMKVWriter) writeSimpleBlock(trackNum uint64, data []byte, timec
 	return nil
 }
 
-func (w *RawVideoMKVWriter) startNewCluster(timecodeMs uint64) error {
+func (w *DecodedMKVWriter) startNewCluster(timecodeMs uint64) error {
 	w.clusterTime = timecodeMs
 
 	// Write Cluster element with unknown size
@@ -558,7 +462,7 @@ func (w *RawVideoMKVWriter) startNewCluster(timecodeMs uint64) error {
 	return w.writeEBMLElement(w.writer, timecode, w.encodeUInt(timecodeMs))
 }
 
-func (w *RawVideoMKVWriter) writeEBMLElement(wr io.Writer, id uint32, data []byte) error {
+func (w *DecodedMKVWriter) writeEBMLElement(wr io.Writer, id uint32, data []byte) error {
 	// Write ID
 	if err := w.writeEBMLID(wr, id); err != nil {
 		return err
@@ -574,7 +478,7 @@ func (w *RawVideoMKVWriter) writeEBMLElement(wr io.Writer, id uint32, data []byt
 	return err
 }
 
-func (w *RawVideoMKVWriter) writeEBMLID(wr io.Writer, id uint32) error {
+func (w *DecodedMKVWriter) writeEBMLID(wr io.Writer, id uint32) error {
 	if id <= 0xFF {
 		_, err := wr.Write([]byte{byte(id)})
 		return err
@@ -588,7 +492,7 @@ func (w *RawVideoMKVWriter) writeEBMLID(wr io.Writer, id uint32) error {
 	}
 }
 
-func (w *RawVideoMKVWriter) writeVarInt(wr io.Writer, n uint64) error {
+func (w *DecodedMKVWriter) writeVarInt(wr io.Writer, n uint64) error {
 	if n < 127 {
 		_, err := wr.Write([]byte{byte(n | 0x80)})
 		return err
@@ -605,7 +509,7 @@ func (w *RawVideoMKVWriter) writeVarInt(wr io.Writer, n uint64) error {
 	return fmt.Errorf("VarInt too large: %d", n)
 }
 
-func (w *RawVideoMKVWriter) encodeUInt(n uint64) []byte {
+func (w *DecodedMKVWriter) encodeUInt(n uint64) []byte {
 	buf := make([]byte, 8)
 	size := 0
 	for i := 7; i >= 0; i-- {
@@ -620,7 +524,7 @@ func (w *RawVideoMKVWriter) encodeUInt(n uint64) []byte {
 	return buf[:size]
 }
 
-func (w *RawVideoMKVWriter) encodeFloat(f float64) []byte {
+func (w *DecodedMKVWriter) encodeFloat(f float64) []byte {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, *(*uint64)(unsafe.Pointer(&f)))
 	return buf

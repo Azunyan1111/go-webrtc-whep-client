@@ -8,9 +8,9 @@ import (
 )
 
 var (
-	WhepURL         string
-	WhipURL         string
-	DebugMode       bool
+	WhepURL           string
+	WhipURL           string
+	DebugMode         bool
 	NoFrameValidation bool
 )
 

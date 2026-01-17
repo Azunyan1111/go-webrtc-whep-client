@@ -6,10 +6,10 @@ package internal
 type FrameValidator struct {
 	width              int
 	height             int
-	lastFrame          []byte  // 前フレームのRGBAデータ
-	lastHistogram      []int   // 前フレームの輝度ヒストグラム
-	frameCount         int     // 処理フレーム数
-	consecutiveInvalid int     // 連続無効フレーム数
+	lastFrame          []byte // 前フレームのRGBAデータ
+	lastHistogram      []int  // 前フレームの輝度ヒストグラム
+	frameCount         int    // 処理フレーム数
+	consecutiveInvalid int    // 連続無効フレーム数
 	thresholds         ValidationThresholds
 }
 
@@ -32,12 +32,12 @@ type ValidationThresholds struct {
 // DefaultThresholds はデフォルトの検証閾値を返す
 func DefaultThresholds() ValidationThresholds {
 	return ValidationThresholds{
-		MaxChangedPixelRatio:   0.30, // 30%以上のピクセルが急変したら異常
-		PixelChangeThreshold:   150,  // RGBA差分合計がこれ以上で「変化」とみなす
-		BlockEdgeThreshold:     80,   // ブロック境界での輝度差閾値
+		MaxChangedPixelRatio:   0.30,  // 30%以上のピクセルが急変したら異常
+		PixelChangeThreshold:   150,   // RGBA差分合計がこれ以上で「変化」とみなす
+		BlockEdgeThreshold:     80,    // ブロック境界での輝度差閾値
 		GreenDominantRatio:     0.006, // 0.6%以上が緑優位なら異常（正常:0.28%、ノイズ:0.75%以上）
-		HistogramDiffThreshold: 1.00, // ヒストグラム検出は無効化（正常時の方が高い値が出るため）
-		MaxConsecutiveInvalid:  5,    // 5フレーム連続無効でキーフレーム待ち
+		HistogramDiffThreshold: 1.00,  // ヒストグラム検出は無効化（正常時の方が高い値が出るため）
+		MaxConsecutiveInvalid:  5,     // 5フレーム連続無効でキーフレーム待ち
 	}
 }
 
