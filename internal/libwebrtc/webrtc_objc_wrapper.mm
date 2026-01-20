@@ -30,7 +30,6 @@
 #include "rtc_base/thread.h"
 #include "rtc_base/ref_counted_object.h"
 #include "libyuv/convert_argb.h"
-#include "modules/audio_device/include/fake_audio_device.h"
 
 namespace {
 
@@ -55,7 +54,7 @@ public:
                 network_thread_.get(),
                 worker_thread_.get(),
                 signaling_thread_.get(),
-                webrtc::scoped_refptr<webrtc::AudioDeviceModule>(new webrtc::FakeAudioDeviceModule()),  // no speaker output
+                nullptr,  // no AudioDeviceModule = no speaker output
                 webrtc::CreateBuiltinAudioEncoderFactory(),
                 webrtc::CreateBuiltinAudioDecoderFactory(),
                 webrtc::CreateBuiltinVideoEncoderFactory(),
