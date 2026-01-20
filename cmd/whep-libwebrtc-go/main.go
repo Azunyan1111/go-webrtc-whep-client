@@ -124,8 +124,8 @@ func run() error {
 				}
 			}
 		},
-		OnEncodedAudioFrame: func(frame *libwebrtc.EncodedAudioFrame) {
-			if err := mkvWriter.WriteEncodedAudioFrame(frame); err != nil {
+		OnAudioFrame: func(frame *libwebrtc.AudioFrame) {
+			if err := mkvWriter.WriteAudioFrame(frame); err != nil {
 				if debugMode {
 					fmt.Fprintf(os.Stderr, "Audio write error: %v\n", err)
 				}

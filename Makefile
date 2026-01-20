@@ -39,10 +39,10 @@ WRAPPER_OBJ := $(WRAPPER_DIR)/webrtc_objc_wrapper.o
 WRAPPER_LIB := $(WRAPPER_DIR)/libwebrtc_objc_wrapper.a
 
 # libwebrtc download URL (shiguredo-webrtc-build)
-LIBWEBRTC_VERSION := m120.0.6099.129
-LIBWEBRTC_URL_MACOS_ARM64 := https://github.com/AzuCLR/libwebrtc-build/releases/download/$(LIBWEBRTC_VERSION)/libwebrtc-macos-arm64-$(LIBWEBRTC_VERSION).tar.gz
-LIBWEBRTC_URL_MACOS_X64 := https://github.com/AzuCLR/libwebrtc-build/releases/download/$(LIBWEBRTC_VERSION)/libwebrtc-macos-x86_64-$(LIBWEBRTC_VERSION).tar.gz
-LIBWEBRTC_URL_LINUX_X64 := https://github.com/AzuCLR/libwebrtc-build/releases/download/$(LIBWEBRTC_VERSION)/libwebrtc-ubuntu-x86_64-$(LIBWEBRTC_VERSION).tar.gz
+LIBWEBRTC_VERSION := m144.7559.2.1
+LIBWEBRTC_URL_BASE := https://github.com/shiguredo-webrtc-build/webrtc-build/releases/download/$(LIBWEBRTC_VERSION)
+LIBWEBRTC_URL_MACOS_ARM64 := $(LIBWEBRTC_URL_BASE)/webrtc.macos_arm64.tar.gz
+LIBWEBRTC_URL_LINUX_X64 := $(LIBWEBRTC_URL_BASE)/webrtc.ubuntu-24.04_x86_64.tar.gz
 
 # C++ compiler flags for libwebrtc wrapper
 CXX := c++
@@ -111,36 +111,49 @@ $(LIBWEBRTC_CONFIG_SITE):
 	@echo "Run 'make download-libwebrtc' to download it"
 	@exit 1
 
-# Download libwebrtc (macOS arm64)
+# __config_site content for ABI compatibility
+define CONFIG_SITE_CONTENT
+//===----------------------------------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#ifndef _LIBCPP___CONFIG_SITE
+#define _LIBCPP___CONFIG_SITE
+
+#define _LIBCPP_ABI_VERSION 2
+#define _LIBCPP_ABI_NAMESPACE __Cr
+
+#define _LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS
+#define _LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS
+
+#endif // _LIBCPP___CONFIG_SITE
+endef
+export CONFIG_SITE_CONTENT
+
+# Download libwebrtc for all supported platforms
 download-libwebrtc:
-ifeq ($(UNAME_S),Darwin)
-ifeq ($(UNAME_M),arm64)
-	@echo "Downloading libwebrtc for macOS arm64..."
+	@echo "Downloading libwebrtc $(LIBWEBRTC_VERSION) for macOS arm64..."
 	@mkdir -p $(LIBWEBRTC_DIR)
-	curl -L -o /tmp/libwebrtc.tar.gz $(LIBWEBRTC_URL_MACOS_ARM64)
-	tar xzf /tmp/libwebrtc.tar.gz -C $(LIBWEBRTC_DIR)
-	rm /tmp/libwebrtc.tar.gz
+	curl -L -o /tmp/libwebrtc-macos.tar.gz $(LIBWEBRTC_URL_MACOS_ARM64)
+	tar xzf /tmp/libwebrtc-macos.tar.gz -C $(LIBWEBRTC_DIR)
+	rm /tmp/libwebrtc-macos.tar.gz
+	@rm -rf $(LIBWEBRTC_DIR)/webrtc/Frameworks
+	@mkdir -p $(LIBWEBRTC_DIR)/webrtc/include/buildtools/third_party/libc++
+	@echo "$$CONFIG_SITE_CONTENT" > $(LIBWEBRTC_DIR)/webrtc/include/buildtools/third_party/libc++/__config_site
 	@echo "Downloaded to $(LIBWEBRTC_DIR)"
-else
-	@echo "Downloading libwebrtc for macOS x86_64..."
-	@mkdir -p webrtc-macos-x86_64
-	curl -L -o /tmp/libwebrtc.tar.gz $(LIBWEBRTC_URL_MACOS_X64)
-	tar xzf /tmp/libwebrtc.tar.gz -C webrtc-macos-x86_64
-	rm /tmp/libwebrtc.tar.gz
-	@echo "Downloaded to webrtc-macos-x86_64"
-	@echo "NOTE: Update LIBWEBRTC_DIR in Makefile or cgo_darwin_amd64.go"
-endif
-else ifeq ($(UNAME_S),Linux)
-	@echo "Downloading libwebrtc for Linux x86_64..."
+	@echo ""
+	@echo "Downloading libwebrtc $(LIBWEBRTC_VERSION) for Linux x86_64..."
 	@mkdir -p webrtc-ubuntu-x86_64
-	curl -L -o /tmp/libwebrtc.tar.gz $(LIBWEBRTC_URL_LINUX_X64)
-	tar xzf /tmp/libwebrtc.tar.gz -C webrtc-ubuntu-x86_64
-	rm /tmp/libwebrtc.tar.gz
+	curl -L -o /tmp/libwebrtc-linux.tar.gz $(LIBWEBRTC_URL_LINUX_X64)
+	tar xzf /tmp/libwebrtc-linux.tar.gz -C webrtc-ubuntu-x86_64
+	rm /tmp/libwebrtc-linux.tar.gz
+	@mkdir -p webrtc-ubuntu-x86_64/webrtc/include/buildtools/third_party/libc++
+	@echo "$$CONFIG_SITE_CONTENT" > webrtc-ubuntu-x86_64/webrtc/include/buildtools/third_party/libc++/__config_site
 	@echo "Downloaded to webrtc-ubuntu-x86_64"
-else
-	@echo "ERROR: Unsupported platform $(UNAME_S) $(UNAME_M)"
-	@exit 1
-endif
 
 # Format Go code
 fmt:
@@ -162,7 +175,7 @@ clean:
 
 # Clean everything including libwebrtc downloads
 clean-all: clean
-	rm -rf webrtc-macos-arm64 webrtc-macos-x86_64 webrtc-ubuntu-x86_64
+	rm -rf webrtc-macos-arm64 webrtc-ubuntu-x86_64
 	rm -f /tmp/libwebrtc.tar.gz
 
 # Rebuild libwebrtc wrapper from scratch

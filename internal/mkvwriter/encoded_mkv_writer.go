@@ -14,7 +14,7 @@ import (
 	"github.com/Azunyan1111/go-webrtc-whep-client/internal/libwebrtc"
 )
 
-// codecPrivate is a placeholder for Opus CodecPrivate element
+// EBML element IDs (additional for this file)
 const (
 	codecPrivate = 0x63A2
 )
@@ -32,9 +32,8 @@ type EncodedMKVWriter struct {
 	videoTrackNum   uint64
 	audioTrackNum   uint64
 	clusterTime     uint64
-	// Separate base timestamps for video and audio
+	// Base timestamps for video and audio
 	videoBaseTs  int64
-	audioBaseTs  uint32 // RTP timestamp (48kHz)
 	hasVideoBase bool
 	hasAudioBase bool
 	// Wall clock time for synchronization
@@ -118,9 +117,9 @@ func (w *EncodedMKVWriter) WriteVideoFrame(frame *libwebrtc.VideoFrame) error {
 	return w.writeSimpleBlock(w.videoTrackNum, rgba, timecodeMs, keyframe)
 }
 
-// WriteEncodedAudioFrame writes an encoded Opus audio frame
-func (w *EncodedMKVWriter) WriteEncodedAudioFrame(frame *libwebrtc.EncodedAudioFrame) error {
-	if frame == nil || len(frame.Data) == 0 {
+// WriteAudioFrame writes a decoded PCM audio frame
+func (w *EncodedMKVWriter) WriteAudioFrame(frame *libwebrtc.AudioFrame) error {
+	if frame == nil || len(frame.PCM) == 0 {
 		return nil
 	}
 
@@ -135,23 +134,37 @@ func (w *EncodedMKVWriter) WriteEncodedAudioFrame(frame *libwebrtc.EncodedAudioF
 		return nil
 	}
 
-	// Initialize base timestamp and wall clock time
+	// Update sample rate and channels from actual frame if different
+	if frame.SampleRate != w.sampleRate || frame.Channels != w.audioChannels {
+		// Note: In a real implementation, we might need to handle sample rate changes
+		// For now, we assume the first frame sets the correct values
+		if !w.hasAudioBase {
+			w.sampleRate = frame.SampleRate
+			w.audioChannels = frame.Channels
+		}
+	}
+
+	// Initialize wall clock time for synchronization
 	if !w.hasAudioBase {
-		w.audioBaseTs = frame.Timestamp
 		w.hasAudioBase = true
-		// Use wall clock for synchronization if this is the first frame
 		if w.startWallTime == 0 {
 			w.startWallTime = time.Now().UnixMicro()
 		}
-		DebugLog("Base audio RTP timestamp: %d, wall time: %d us\n", w.audioBaseTs, w.startWallTime)
+		DebugLog("Audio started: %d Hz, %d channels, wall time: %d us\n",
+			frame.SampleRate, frame.Channels, w.startWallTime)
 	}
 
 	// Calculate timecode in milliseconds using wall clock time for sync
 	wallElapsed := time.Now().UnixMicro() - w.startWallTime
 	timecodeMs := uint64(wallElapsed / 1000)
 
-	// Write Opus frame directly (no re-encoding needed)
-	return w.writeSimpleBlock(w.audioTrackNum, frame.Data, timecodeMs, false)
+	// Convert PCM int16 to bytes (little-endian)
+	pcmBytes := make([]byte, len(frame.PCM)*2)
+	for i, sample := range frame.PCM {
+		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(sample))
+	}
+
+	return w.writeSimpleBlock(w.audioTrackNum, pcmBytes, timecodeMs, false)
 }
 
 // Run starts the main loop
@@ -309,7 +322,7 @@ func (w *EncodedMKVWriter) writeTracks() error {
 		return err
 	}
 
-	// Audio track - A_OPUS (encoded Opus)
+	// Audio track - A_PCM/INT/LIT (PCM signed 16-bit little-endian)
 	audioEntry := &bytes.Buffer{}
 	if err := w.writeEBMLElement(audioEntry, trackNumber, w.encodeUInt(w.audioTrackNum)); err != nil {
 		return err
@@ -320,14 +333,7 @@ func (w *EncodedMKVWriter) writeTracks() error {
 	if err := w.writeEBMLElement(audioEntry, trackType, []byte{trackTypeAudio}); err != nil {
 		return err
 	}
-	if err := w.writeEBMLElement(audioEntry, codecID, []byte("A_OPUS")); err != nil {
-		return err
-	}
-
-	// CodecPrivate - OpusHead (Opus Identification Header)
-	// See: https://wiki.xiph.org/OggOpus#ID_Header
-	opusHead := w.buildOpusHead()
-	if err := w.writeEBMLElement(audioEntry, codecPrivate, opusHead); err != nil {
+	if err := w.writeEBMLElement(audioEntry, codecID, []byte("A_PCM/INT/LIT")); err != nil {
 		return err
 	}
 
@@ -337,6 +343,10 @@ func (w *EncodedMKVWriter) writeTracks() error {
 		return err
 	}
 	if err := w.writeEBMLElement(audioSettings, channels, w.encodeUInt(uint64(w.audioChannels))); err != nil {
+		return err
+	}
+	// BitDepth - 16 bits per sample
+	if err := w.writeEBMLElement(audioSettings, bitDepth, w.encodeUInt(16)); err != nil {
 		return err
 	}
 	if err := w.writeEBMLElement(audioEntry, audio, audioSettings.Bytes()); err != nil {
@@ -349,27 +359,6 @@ func (w *EncodedMKVWriter) writeTracks() error {
 
 	// Write Tracks element
 	return w.writeEBMLElement(w.writer, tracks, tracksData.Bytes())
-}
-
-// buildOpusHead creates an OpusHead (Opus Identification Header)
-// Format: https://wiki.xiph.org/OggOpus#ID_Header
-func (w *EncodedMKVWriter) buildOpusHead() []byte {
-	head := make([]byte, 19)
-	// Magic signature "OpusHead"
-	copy(head[0:8], []byte("OpusHead"))
-	// Version (1)
-	head[8] = 1
-	// Channel count
-	head[9] = byte(w.audioChannels)
-	// Pre-skip (little-endian uint16) - typically 312 samples for WebRTC
-	binary.LittleEndian.PutUint16(head[10:12], 312)
-	// Input sample rate (little-endian uint32) - original sample rate
-	binary.LittleEndian.PutUint32(head[12:16], uint32(w.sampleRate))
-	// Output gain (little-endian int16) - 0 dB
-	binary.LittleEndian.PutUint16(head[16:18], 0)
-	// Channel mapping family (0 = mono/stereo, no mapping table)
-	head[18] = 0
-	return head
 }
 
 func (w *EncodedMKVWriter) writeSimpleBlock(trackNum uint64, data []byte, timecodeMs uint64, keyframe bool) error {
