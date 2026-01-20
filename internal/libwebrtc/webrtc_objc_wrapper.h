@@ -41,9 +41,9 @@ typedef void (*OnVideoFrameCallback)(uintptr_t userData,
     const uint8_t* dataU, int strideU,
     const uint8_t* dataV, int strideV,
     int width, int height, int64_t timestamp_us);
-typedef void (*OnAudioDataCallback)(uintptr_t userData,
-    const int16_t* data, int sampleRate,
-    int channels, int frames, int64_t timestamp);
+typedef void (*OnEncodedAudioCallback)(uintptr_t userData,
+    const uint8_t* data, int dataLen,
+    uint32_t timestamp, uint16_t sequenceNumber);
 
 // Factory functions
 WebRTCFactoryHandle webrtc_objc_factory_create(void);
@@ -57,7 +57,7 @@ PeerConnectionHandle webrtc_objc_pc_create(
     OnICEStateCallback onICEState,
     OnICEGatheringStateCallback onICEGathering,
     OnVideoFrameCallback onVideoFrame,
-    OnAudioDataCallback onAudioData
+    OnEncodedAudioCallback onEncodedAudio
 );
 
 int webrtc_objc_pc_add_video_transceiver(PeerConnectionHandle pc);

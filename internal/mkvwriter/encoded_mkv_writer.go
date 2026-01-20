@@ -1,0 +1,510 @@
+// Package mkvwriter provides MKV output for decoded video/audio frames
+package mkvwriter
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"io"
+	"sync"
+	"time"
+	"unsafe"
+
+	"github.com/Azunyan1111/go-webrtc-whep-client/internal/libwebrtc"
+)
+
+// codecPrivate is a placeholder for Opus CodecPrivate element
+const (
+	codecPrivate = 0x63A2
+)
+
+// EncodedMKVWriter outputs decoded RGBA video and encoded Opus audio to MKV format
+type EncodedMKVWriter struct {
+	writer          io.Writer
+	bufWriter       *bufio.Writer
+	width           int
+	height          int
+	sampleRate      int
+	audioChannels   int
+	resolutionKnown bool
+	isHeaderWritten bool
+	videoTrackNum   uint64
+	audioTrackNum   uint64
+	clusterTime     uint64
+	// Separate base timestamps for video and audio
+	videoBaseTs  int64
+	audioBaseTs  uint32 // RTP timestamp (48kHz)
+	hasVideoBase bool
+	hasAudioBase bool
+	// Wall clock time for synchronization
+	startWallTime int64
+	mutex         sync.Mutex
+	done          chan struct{}
+	running       chan struct{}
+	initialized   bool
+}
+
+// NewEncodedMKVWriter creates a new EncodedMKVWriter
+func NewEncodedMKVWriter(w io.Writer) *EncodedMKVWriter {
+	bufWriter := bufio.NewWriterSize(w, 64*1024) // 64KB buffer
+	return &EncodedMKVWriter{
+		writer:        bufWriter,
+		bufWriter:     bufWriter,
+		videoTrackNum: 1,
+		audioTrackNum: 2,
+		sampleRate:    48000, // Opus always 48kHz
+		audioChannels: 2,     // default stereo
+		done:          make(chan struct{}),
+		running:       make(chan struct{}),
+	}
+}
+
+// WriteVideoFrame writes a decoded video frame (I420 format from libwebrtc)
+func (w *EncodedMKVWriter) WriteVideoFrame(frame *libwebrtc.VideoFrame) error {
+	if frame == nil {
+		return nil
+	}
+
+	// Wait for initialization
+	<-w.running
+
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	// Detect resolution from first frame
+	if !w.resolutionKnown {
+		// Skip low-resolution preview frames
+		if frame.Width < 640 || frame.Height < 360 {
+			DebugLog("Skipping low-resolution frame: %dx%d (waiting for >= 640x360)\n", frame.Width, frame.Height)
+			return nil
+		}
+		w.width = frame.Width
+		w.height = frame.Height
+		w.resolutionKnown = true
+		DebugLog("Resolution detected: %dx%d\n", w.width, w.height)
+
+		if err := w.writeHeaders(); err != nil {
+			return fmt.Errorf("failed to write headers: %w", err)
+		}
+	}
+
+	// Initialize base timestamp and wall clock time
+	if !w.hasVideoBase {
+		w.videoBaseTs = frame.TimestampUs
+		w.hasVideoBase = true
+		// Use wall clock for synchronization if this is the first frame
+		if w.startWallTime == 0 {
+			w.startWallTime = time.Now().UnixMicro()
+		}
+		DebugLog("Base video timestamp: %d us, wall time: %d us\n", w.videoBaseTs, w.startWallTime)
+	}
+
+	// Calculate timecode in milliseconds using wall clock time for sync
+	// This ensures playback at correct speed regardless of source timestamps
+	wallElapsed := time.Now().UnixMicro() - w.startWallTime
+	timecodeMs := uint64(wallElapsed / 1000)
+
+	// Convert I420 to RGBA
+	rgba, err := libwebrtc.I420ToRGBA(frame)
+	if err != nil {
+		DebugLog("I420 to RGBA conversion failed: %v\n", err)
+		return nil
+	}
+
+	// Determine if this is a keyframe (for MKV we can treat all RGBA frames as keyframes)
+	keyframe := true
+
+	return w.writeSimpleBlock(w.videoTrackNum, rgba, timecodeMs, keyframe)
+}
+
+// WriteEncodedAudioFrame writes an encoded Opus audio frame
+func (w *EncodedMKVWriter) WriteEncodedAudioFrame(frame *libwebrtc.EncodedAudioFrame) error {
+	if frame == nil || len(frame.Data) == 0 {
+		return nil
+	}
+
+	// Wait for initialization
+	<-w.running
+
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	// Skip if header not written yet
+	if !w.isHeaderWritten {
+		return nil
+	}
+
+	// Initialize base timestamp and wall clock time
+	if !w.hasAudioBase {
+		w.audioBaseTs = frame.Timestamp
+		w.hasAudioBase = true
+		// Use wall clock for synchronization if this is the first frame
+		if w.startWallTime == 0 {
+			w.startWallTime = time.Now().UnixMicro()
+		}
+		DebugLog("Base audio RTP timestamp: %d, wall time: %d us\n", w.audioBaseTs, w.startWallTime)
+	}
+
+	// Calculate timecode in milliseconds using wall clock time for sync
+	wallElapsed := time.Now().UnixMicro() - w.startWallTime
+	timecodeMs := uint64(wallElapsed / 1000)
+
+	// Write Opus frame directly (no re-encoding needed)
+	return w.writeSimpleBlock(w.audioTrackNum, frame.Data, timecodeMs, false)
+}
+
+// Run starts the main loop
+func (w *EncodedMKVWriter) Run() error {
+	w.mutex.Lock()
+	w.initialized = true
+	w.mutex.Unlock()
+	close(w.running)
+
+	// Keep running until Stop() is called
+	<-w.done
+
+	// Final flush
+	if err := w.bufWriter.Flush(); err != nil {
+		return fmt.Errorf("failed to flush final data: %w", err)
+	}
+
+	return nil
+}
+
+// Close cleans up resources
+func (w *EncodedMKVWriter) Close() error {
+	select {
+	case <-w.done:
+		// Already stopped
+	default:
+		close(w.done)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+
+	if w.isHeaderWritten {
+		return w.bufWriter.Flush()
+	}
+	return nil
+}
+
+// writeHeaders writes EBML/MKV headers
+func (w *EncodedMKVWriter) writeHeaders() error {
+	// Write EBML header
+	if err := w.writeEBMLHeader(); err != nil {
+		return fmt.Errorf("failed to write EBML header: %w", err)
+	}
+
+	// Start segment
+	if err := w.writeSegmentHeader(); err != nil {
+		return fmt.Errorf("failed to write segment header: %w", err)
+	}
+
+	// Write Info
+	if err := w.writeInfo(); err != nil {
+		return fmt.Errorf("failed to write info: %w", err)
+	}
+
+	// Write Tracks
+	if err := w.writeTracks(); err != nil {
+		return fmt.Errorf("failed to write tracks: %w", err)
+	}
+
+	// Flush headers immediately
+	if err := w.bufWriter.Flush(); err != nil {
+		return fmt.Errorf("failed to flush headers: %w", err)
+	}
+	w.isHeaderWritten = true
+
+	return nil
+}
+
+func (w *EncodedMKVWriter) writeEBMLHeader() error {
+	header := []byte{
+		0x1A, 0x45, 0xDF, 0xA3, // EBML
+		0x9F,                   // size (31 bytes)
+		0x42, 0x86, 0x81, 0x01, // EBMLVersion = 1
+		0x42, 0xF7, 0x81, 0x01, // EBMLReadVersion = 1
+		0x42, 0xF2, 0x81, 0x04, // EBMLMaxIDLength = 4
+		0x42, 0xF3, 0x81, 0x08, // EBMLMaxSizeLength = 8
+		0x42, 0x82, 0x88, 0x6D, 0x61, 0x74, 0x72, 0x6F, 0x73, 0x6B, 0x61, // DocType = "matroska"
+		0x42, 0x87, 0x81, 0x04, // DocTypeVersion = 4
+		0x42, 0x85, 0x81, 0x02, // DocTypeReadVersion = 2
+	}
+	_, err := w.writer.Write(header)
+	return err
+}
+
+func (w *EncodedMKVWriter) writeSegmentHeader() error {
+	// Segment with unknown size (0x01FFFFFFFFFFFFFF)
+	_, err := w.writer.Write([]byte{0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF})
+	return err
+}
+
+func (w *EncodedMKVWriter) writeInfo() error {
+	infoData := &bytes.Buffer{}
+
+	// TimecodeScale (1ms = 1000000ns)
+	if err := w.writeEBMLElement(infoData, timecodeScale, w.encodeUInt(1000000)); err != nil {
+		return err
+	}
+
+	// MuxingApp
+	if err := w.writeEBMLElement(infoData, muxingApp, []byte("go-webrtc-whep-client-libwebrtc")); err != nil {
+		return err
+	}
+
+	// WritingApp
+	if err := w.writeEBMLElement(infoData, writingApp, []byte("go-webrtc-whep-client-libwebrtc")); err != nil {
+		return err
+	}
+
+	// Write Info element
+	return w.writeEBMLElement(w.writer, info, infoData.Bytes())
+}
+
+func (w *EncodedMKVWriter) writeTracks() error {
+	tracksData := &bytes.Buffer{}
+
+	// Video track - V_UNCOMPRESSED (RGBA)
+	videoEntry := &bytes.Buffer{}
+	if err := w.writeEBMLElement(videoEntry, trackNumber, w.encodeUInt(w.videoTrackNum)); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(videoEntry, trackUID, w.encodeUInt(w.videoTrackNum)); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(videoEntry, trackType, []byte{trackTypeVideo}); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(videoEntry, codecID, []byte("V_UNCOMPRESSED")); err != nil {
+		return err
+	}
+
+	// Video element
+	videoSettings := &bytes.Buffer{}
+	if err := w.writeEBMLElement(videoSettings, pixelWidth, w.encodeUInt(uint64(w.width))); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(videoSettings, pixelHeight, w.encodeUInt(uint64(w.height))); err != nil {
+		return err
+	}
+	// ColourSpace - RGBA (FourCC)
+	if err := w.writeEBMLElement(videoSettings, colourSpace, []byte("RGBA")); err != nil {
+		return err
+	}
+	// BitsPerChannel - 8 bits per channel
+	if err := w.writeEBMLElement(videoSettings, bitsPerChannel, w.encodeUInt(8)); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(videoEntry, video, videoSettings.Bytes()); err != nil {
+		return err
+	}
+
+	if err := w.writeEBMLElement(tracksData, trackEntry, videoEntry.Bytes()); err != nil {
+		return err
+	}
+
+	// Audio track - A_OPUS (encoded Opus)
+	audioEntry := &bytes.Buffer{}
+	if err := w.writeEBMLElement(audioEntry, trackNumber, w.encodeUInt(w.audioTrackNum)); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(audioEntry, trackUID, w.encodeUInt(w.audioTrackNum)); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(audioEntry, trackType, []byte{trackTypeAudio}); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(audioEntry, codecID, []byte("A_OPUS")); err != nil {
+		return err
+	}
+
+	// CodecPrivate - OpusHead (Opus Identification Header)
+	// See: https://wiki.xiph.org/OggOpus#ID_Header
+	opusHead := w.buildOpusHead()
+	if err := w.writeEBMLElement(audioEntry, codecPrivate, opusHead); err != nil {
+		return err
+	}
+
+	// Audio element
+	audioSettings := &bytes.Buffer{}
+	if err := w.writeEBMLElement(audioSettings, samplingFrequency, w.encodeFloat(float64(w.sampleRate))); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(audioSettings, channels, w.encodeUInt(uint64(w.audioChannels))); err != nil {
+		return err
+	}
+	if err := w.writeEBMLElement(audioEntry, audio, audioSettings.Bytes()); err != nil {
+		return err
+	}
+
+	if err := w.writeEBMLElement(tracksData, trackEntry, audioEntry.Bytes()); err != nil {
+		return err
+	}
+
+	// Write Tracks element
+	return w.writeEBMLElement(w.writer, tracks, tracksData.Bytes())
+}
+
+// buildOpusHead creates an OpusHead (Opus Identification Header)
+// Format: https://wiki.xiph.org/OggOpus#ID_Header
+func (w *EncodedMKVWriter) buildOpusHead() []byte {
+	head := make([]byte, 19)
+	// Magic signature "OpusHead"
+	copy(head[0:8], []byte("OpusHead"))
+	// Version (1)
+	head[8] = 1
+	// Channel count
+	head[9] = byte(w.audioChannels)
+	// Pre-skip (little-endian uint16) - typically 312 samples for WebRTC
+	binary.LittleEndian.PutUint16(head[10:12], 312)
+	// Input sample rate (little-endian uint32) - original sample rate
+	binary.LittleEndian.PutUint32(head[12:16], uint32(w.sampleRate))
+	// Output gain (little-endian int16) - 0 dB
+	binary.LittleEndian.PutUint16(head[16:18], 0)
+	// Channel mapping family (0 = mono/stereo, no mapping table)
+	head[18] = 0
+	return head
+}
+
+func (w *EncodedMKVWriter) writeSimpleBlock(trackNum uint64, data []byte, timecodeMs uint64, keyframe bool) error {
+	// Start new cluster on keyframe or every second
+	needNewCluster := false
+	if keyframe && trackNum == w.videoTrackNum {
+		needNewCluster = true
+	} else if timecodeMs-w.clusterTime > 1000 || w.clusterTime == 0 {
+		needNewCluster = true
+	}
+
+	if needNewCluster {
+		if err := w.startNewCluster(timecodeMs); err != nil {
+			return fmt.Errorf("failed to start new cluster: %w", err)
+		}
+	}
+
+	block := &bytes.Buffer{}
+
+	// Track number (variable size integer)
+	if err := w.writeVarInt(block, trackNum); err != nil {
+		return fmt.Errorf("failed to write track number: %w", err)
+	}
+
+	// Timecode (relative to cluster)
+	relativeTime := int16(timecodeMs - w.clusterTime)
+	if err := binary.Write(block, binary.BigEndian, relativeTime); err != nil {
+		return fmt.Errorf("failed to write timecode: %w", err)
+	}
+
+	// Flags
+	flags := byte(0)
+	if keyframe {
+		flags |= 0x80
+	}
+	if err := block.WriteByte(flags); err != nil {
+		return fmt.Errorf("failed to write flags: %w", err)
+	}
+
+	// Frame data
+	if _, err := block.Write(data); err != nil {
+		return fmt.Errorf("failed to write frame data: %w", err)
+	}
+
+	// Write SimpleBlock
+	if err := w.writeEBMLElement(w.writer, simpleBlock, block.Bytes()); err != nil {
+		return fmt.Errorf("failed to write simple block: %w", err)
+	}
+
+	// Flush more frequently for lower latency
+	if w.isHeaderWritten && (keyframe || timecodeMs-w.clusterTime > 100) {
+		if err := w.bufWriter.Flush(); err != nil {
+			return fmt.Errorf("failed to flush buffer: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (w *EncodedMKVWriter) startNewCluster(timecodeMs uint64) error {
+	w.clusterTime = timecodeMs
+
+	// Write Cluster element with unknown size
+	if _, err := w.writer.Write([]byte{0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}); err != nil {
+		return err
+	}
+
+	// Write Timecode
+	return w.writeEBMLElement(w.writer, timecode, w.encodeUInt(timecodeMs))
+}
+
+func (w *EncodedMKVWriter) writeEBMLElement(wr io.Writer, id uint32, data []byte) error {
+	// Write ID
+	if err := w.writeEBMLID(wr, id); err != nil {
+		return err
+	}
+
+	// Write size
+	if err := w.writeVarInt(wr, uint64(len(data))); err != nil {
+		return err
+	}
+
+	// Write data
+	_, err := wr.Write(data)
+	return err
+}
+
+func (w *EncodedMKVWriter) writeEBMLID(wr io.Writer, id uint32) error {
+	if id <= 0xFF {
+		_, err := wr.Write([]byte{byte(id)})
+		return err
+	} else if id <= 0xFFFF {
+		return binary.Write(wr, binary.BigEndian, uint16(id))
+	} else if id <= 0xFFFFFF {
+		_, err := wr.Write([]byte{byte(id >> 16), byte(id >> 8), byte(id)})
+		return err
+	} else {
+		return binary.Write(wr, binary.BigEndian, id)
+	}
+}
+
+func (w *EncodedMKVWriter) writeVarInt(wr io.Writer, n uint64) error {
+	if n < 127 {
+		_, err := wr.Write([]byte{byte(n | 0x80)})
+		return err
+	} else if n < 16383 {
+		_, err := wr.Write([]byte{byte((n >> 8) | 0x40), byte(n)})
+		return err
+	} else if n < 2097151 {
+		_, err := wr.Write([]byte{byte((n >> 16) | 0x20), byte(n >> 8), byte(n)})
+		return err
+	} else if n < 268435455 {
+		_, err := wr.Write([]byte{byte((n >> 24) | 0x10), byte(n >> 16), byte(n >> 8), byte(n)})
+		return err
+	}
+	return fmt.Errorf("VarInt too large: %d", n)
+}
+
+func (w *EncodedMKVWriter) encodeUInt(n uint64) []byte {
+	buf := make([]byte, 8)
+	size := 0
+	for i := 7; i >= 0; i-- {
+		if n > 0 || size > 0 {
+			buf[size] = byte(n >> (uint(i) * 8))
+			size++
+		}
+	}
+	if size == 0 {
+		return []byte{0}
+	}
+	return buf[:size]
+}
+
+func (w *EncodedMKVWriter) encodeFloat(f float64) []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, *(*uint64)(unsafe.Pointer(&f)))
+	return buf
+}

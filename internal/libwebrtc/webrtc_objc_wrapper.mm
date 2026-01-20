@@ -30,6 +30,7 @@
 #include "rtc_base/thread.h"
 #include "rtc_base/ref_counted_object.h"
 #include "libyuv/convert_argb.h"
+#include "api/frame_transformer_interface.h"
 
 namespace {
 
@@ -114,35 +115,52 @@ private:
     OnVideoFrameCallback callback_;
 };
 
-// Audio sink implementation
-class AudioSinkImpl : public webrtc::AudioTrackSinkInterface {
+// Audio frame transformer implementation for encoded Opus passthrough
+class AudioFrameTransformer : public webrtc::FrameTransformerInterface {
 public:
-    AudioSinkImpl(uintptr_t userData, OnAudioDataCallback callback)
-        : userData_(userData), callback_(callback), total_samples_(0) {}
+    AudioFrameTransformer(uintptr_t userData, OnEncodedAudioCallback callback)
+        : userData_(userData), callback_(callback) {}
 
-    void OnData(const void* audio_data, int bits_per_sample,
-                int sample_rate, size_t number_of_channels,
-                size_t number_of_frames) override {
-        if (!callback_) return;
-        if (bits_per_sample != 16) return;
+    void Transform(std::unique_ptr<webrtc::TransformableFrameInterface> frame) override {
+        if (callback_) {
+            auto* audio_frame = static_cast<webrtc::TransformableAudioFrameInterface*>(frame.get());
+            auto data = frame->GetData();
+            auto seqNum = audio_frame->SequenceNumber();
 
-        // Calculate timestamp in microseconds from total samples
-        // timestamp_us = (total_samples * 1000000) / sample_rate
-        int64_t timestamp_us = (total_samples_ * 1000000LL) / sample_rate;
-        total_samples_ += number_of_frames;
+            // Debug: log first few bytes and size (only first 50 frames)
+            static int debug_count = 0;
+            if (debug_count < 50) {
+                fprintf(stderr, "[AudioFrameTransformer] Frame size=%zu, timestamp=%u, seq=%u, first bytes:",
+                        data.size(), frame->GetTimestamp(), seqNum.value_or(0));
+                for (size_t i = 0; i < std::min(data.size(), size_t(16)); i++) {
+                    fprintf(stderr, " %02x", data.data()[i]);
+                }
+                fprintf(stderr, "\n");
+                fflush(stderr);
+                debug_count++;
+            }
 
-        callback_(userData_,
-            static_cast<const int16_t*>(audio_data),
-            sample_rate,
-            static_cast<int>(number_of_channels),
-            static_cast<int>(number_of_frames),
-            timestamp_us);
+            callback_(userData_,
+                data.data(), static_cast<int>(data.size()),
+                frame->GetTimestamp(),
+                seqNum.value_or(0));
+        }
+        // Do not forward to decoder - skip PCM decoding
+    }
+
+    void RegisterTransformedFrameSinkCallback(
+        webrtc::scoped_refptr<webrtc::TransformedFrameCallback> callback,
+        uint32_t ssrc) override {
+        // Not used - we don't forward frames to decoder
+    }
+
+    void UnregisterTransformedFrameSinkCallback(uint32_t ssrc) override {
+        // Not used
     }
 
 private:
     uintptr_t userData_;
-    OnAudioDataCallback callback_;
-    int64_t total_samples_;
+    OnEncodedAudioCallback callback_;
 };
 
 // Create SDP Observer
@@ -246,13 +264,13 @@ public:
         OnICEStateCallback onICEState,
         OnICEGatheringStateCallback onICEGathering,
         OnVideoFrameCallback onVideoFrame,
-        OnAudioDataCallback onAudioData)
+        OnEncodedAudioCallback onEncodedAudio)
         : factory_(factory)
         , userData_(userData)
         , onICEState_(onICEState)
         , onICEGathering_(onICEGathering)
         , videoSink_(new VideoSinkImpl(userData, onVideoFrame))
-        , audioSink_(new AudioSinkImpl(userData, onAudioData)) {
+        , audioFrameTransformer_(webrtc::make_ref_counted<AudioFrameTransformer>(userData, onEncodedAudio)) {
 
         webrtc::PeerConnectionInterface::RTCConfiguration config;
         config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
@@ -302,13 +320,18 @@ public:
         auto track = transceiver->receiver()->track();
         if (!track) return;
 
+        NSLog(@"[OnTrack] Track kind: %s", track->kind().c_str());
+
         if (track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
             auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
             webrtc::VideoSinkWants wants;
             video_track->AddOrUpdateSink(videoSink_.get(), wants);
+            NSLog(@"[OnTrack] Video sink added");
         } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
-            auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
-            audio_track->AddSink(audioSink_.get());
+            // Use FrameTransformer to get encoded Opus frames
+            NSLog(@"[OnTrack] Setting audio FrameTransformer");
+            transceiver->receiver()->SetFrameTransformer(audioFrameTransformer_);
+            NSLog(@"[OnTrack] Audio FrameTransformer set");
         }
     }
 
@@ -319,7 +342,7 @@ private:
     OnICEStateCallback onICEState_;
     OnICEGatheringStateCallback onICEGathering_;
     std::unique_ptr<VideoSinkImpl> videoSink_;
-    std::unique_ptr<AudioSinkImpl> audioSink_;
+    webrtc::scoped_refptr<AudioFrameTransformer> audioFrameTransformer_;
 };
 
 }  // namespace
@@ -351,7 +374,7 @@ PeerConnectionHandle webrtc_objc_pc_create(
     OnICEStateCallback onICEState,
     OnICEGatheringStateCallback onICEGathering,
     OnVideoFrameCallback onVideoFrame,
-    OnAudioDataCallback onAudioData) {
+    OnEncodedAudioCallback onEncodedAudio) {
 
     @autoreleasepool {
         if (!factory) return nullptr;
@@ -363,7 +386,7 @@ PeerConnectionHandle webrtc_objc_pc_create(
             onICEState,
             onICEGathering,
             onVideoFrame,
-            onAudioData
+            onEncodedAudio
         );
 
         if (!wrapper->valid()) {

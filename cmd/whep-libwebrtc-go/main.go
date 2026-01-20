@@ -20,9 +20,6 @@ import (
 const (
 	connectionTimeout      = 30 * time.Second
 	mediaTimeout           = 10 * time.Second
-	maxReconnectAttempts   = 10
-	reconnectInterval      = 5 * time.Second
-	recoveryTimeout        = 5 * time.Second
 	streamTimeout          = 5 * time.Second
 	streamTimeoutCheckFreq = 1 * time.Second
 )
@@ -79,33 +76,6 @@ func run() error {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(sigChan)
 
-	var lastErr error
-	for attempt := 1; attempt <= maxReconnectAttempts; attempt++ {
-		if attempt > 1 {
-			fmt.Fprintf(os.Stderr, "Reconnection attempt %d/%d in %v...\n",
-				attempt, maxReconnectAttempts, reconnectInterval)
-			select {
-			case <-sigChan:
-				fmt.Fprintln(os.Stderr, "Interrupted, exiting...")
-				return nil
-			case <-time.After(reconnectInterval):
-			}
-		}
-
-		err := connectAndStream(sigChan)
-		if err == nil {
-			return nil
-		}
-
-		lastErr = err
-		fmt.Fprintf(os.Stderr, "Connection error: %v\n", err)
-	}
-
-	return fmt.Errorf("max reconnection attempts (%d) exceeded: %w",
-		maxReconnectAttempts, lastErr)
-}
-
-func connectAndStream(sigChan <-chan os.Signal) error {
 	// Create WebRTC factory
 	factory, err := libwebrtc.NewFactory()
 	if err != nil {
@@ -113,8 +83,8 @@ func connectAndStream(sigChan <-chan os.Signal) error {
 	}
 	defer factory.Close()
 
-	// Create MKV writer
-	mkvWriter := mkvwriter.NewDecodedMKVWriter(os.Stdout)
+	// Create MKV writer (RGBA video + encoded Opus audio)
+	mkvWriter := mkvwriter.NewEncodedMKVWriter(os.Stdout)
 
 	// State tracking
 	var (
@@ -123,9 +93,6 @@ func connectAndStream(sigChan <-chan os.Signal) error {
 		mediaReceived = make(chan struct{})
 		mediaOnce     sync.Once
 	)
-
-	// ICE state event channel for monitoring
-	eventChan := make(chan libwebrtc.ICEConnectionState, 10)
 
 	// Last frame received time for stream timeout detection
 	var lastFrameTime atomic.Value
@@ -139,10 +106,6 @@ func connectAndStream(sigChan <-chan os.Signal) error {
 				connectedOnce.Do(func() {
 					close(connected)
 				})
-			}
-			select {
-			case eventChan <- state:
-			default:
 			}
 		},
 		OnICEGatheringState: func(state libwebrtc.ICEGatheringState) {
@@ -161,8 +124,8 @@ func connectAndStream(sigChan <-chan os.Signal) error {
 				}
 			}
 		},
-		OnAudioFrame: func(frame *libwebrtc.AudioFrame) {
-			if err := mkvWriter.WriteAudioFrame(frame); err != nil {
+		OnEncodedAudioFrame: func(frame *libwebrtc.EncodedAudioFrame) {
+			if err := mkvWriter.WriteEncodedAudioFrame(frame); err != nil {
 				if debugMode {
 					fmt.Fprintf(os.Stderr, "Audio write error: %v\n", err)
 				}
@@ -264,14 +227,14 @@ func connectAndStream(sigChan <-chan os.Signal) error {
 	}
 
 	fmt.Fprintln(os.Stderr, "Connected to WHEP server, receiving media...")
-	fmt.Fprintln(os.Stderr, "Piping Matroska (MKV) stream with decoded rawvideo + PCM audio to stdout")
+	fmt.Fprintln(os.Stderr, "Piping Matroska (MKV) stream with decoded rawvideo + encoded Opus audio to stdout")
 	fmt.Fprintln(os.Stderr, "Press Ctrl+C to stop")
 
 	// Stream timeout ticker
 	streamTimeoutTicker := time.NewTicker(streamTimeoutCheckFreq)
 	defer streamTimeoutTicker.Stop()
 
-	// Main loop with ICE state monitoring and stream timeout detection
+	// Main loop with stream timeout detection
 	for {
 		select {
 		case <-sigChan:
@@ -290,19 +253,6 @@ func connectAndStream(sigChan <-chan os.Signal) error {
 				fmt.Fprintln(os.Stderr, "Stream timeout, no frames received...")
 				mkvWriter.Close()
 				return fmt.Errorf("stream timeout: no frames received for %v", streamTimeout)
-			}
-		case state := <-eventChan:
-			switch state {
-			case libwebrtc.ICEConnectionFailed:
-				mkvWriter.Close()
-				return fmt.Errorf("connection lost")
-			case libwebrtc.ICEConnectionDisconnected:
-				fmt.Fprintln(os.Stderr, "ICE disconnected, waiting for recovery...")
-				if err := waitForRecovery(eventChan, sigChan, recoveryTimeout); err != nil {
-					mkvWriter.Close()
-					return err
-				}
-				fmt.Fprintln(os.Stderr, "ICE reconnected")
 			}
 		}
 	}
@@ -334,28 +284,4 @@ func sendOfferToWHEP(offer, url string) (string, error) {
 	}
 
 	return string(answer), nil
-}
-
-func waitForRecovery(eventChan <-chan libwebrtc.ICEConnectionState,
-	sigChan <-chan os.Signal,
-	timeout time.Duration) error {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	for {
-		select {
-		case <-timer.C:
-			return fmt.Errorf("ICE recovery timeout")
-		case state := <-eventChan:
-			if state == libwebrtc.ICEConnectionConnected ||
-				state == libwebrtc.ICEConnectionCompleted {
-				return nil
-			}
-			if state == libwebrtc.ICEConnectionFailed {
-				return fmt.Errorf("ICE recovery failed")
-			}
-		case <-sigChan:
-			return nil
-		}
-	}
 }

@@ -13,9 +13,9 @@ void goOnVideoFrame(uintptr_t userData,
     const uint8_t* dataU, int strideU,
     const uint8_t* dataV, int strideV,
     int width, int height, int64_t timestamp_us);
-void goOnAudioData(uintptr_t userData,
-    const int16_t* data, int sampleRate,
-    int channels, int frames, int64_t timestamp_us);
+void goOnEncodedAudio(uintptr_t userData,
+    const uint8_t* data, int dataLen,
+    uint32_t timestamp, uint16_t sequenceNumber);
 */
 import "C"
 
@@ -94,7 +94,7 @@ type VideoFrame struct {
 	TimestampUs int64 // Timestamp in microseconds
 }
 
-// AudioFrame represents decoded audio data in PCM format
+// AudioFrame represents decoded audio data in PCM format (for compatibility)
 type AudioFrame struct {
 	PCM         []int16
 	SampleRate  int
@@ -103,12 +103,19 @@ type AudioFrame struct {
 	TimestampUs int64 // Timestamp in microseconds
 }
 
+// EncodedAudioFrame represents an encoded Opus audio frame
+type EncodedAudioFrame struct {
+	Data           []byte
+	Timestamp      uint32 // RTP timestamp (48kHz for Opus)
+	SequenceNumber uint16
+}
+
 // Callbacks holds callback functions for a PeerConnection
 type Callbacks struct {
 	OnICEConnectionState func(ICEConnectionState)
 	OnICEGatheringState  func(ICEGatheringState)
 	OnVideoFrame         func(*VideoFrame)
-	OnAudioFrame         func(*AudioFrame)
+	OnEncodedAudioFrame  func(*EncodedAudioFrame)
 }
 
 // Global callback registry
@@ -189,7 +196,7 @@ func NewPeerConnection(factory *Factory, stunServer string, callbacks *Callbacks
 		C.OnICEStateCallback(C.goOnICEState),
 		C.OnICEGatheringStateCallback(C.goOnICEGathering),
 		C.OnVideoFrameCallback(C.goOnVideoFrame),
-		C.OnAudioDataCallback(C.goOnAudioData),
+		C.OnEncodedAudioCallback(C.goOnEncodedAudio),
 	)
 
 	if handle == nil {

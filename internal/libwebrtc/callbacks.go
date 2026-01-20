@@ -64,31 +64,22 @@ func goOnVideoFrame(userData C.uintptr_t,
 	cb.OnVideoFrame(frame)
 }
 
-//export goOnAudioData
-func goOnAudioData(userData C.uintptr_t,
-	data *C.int16_t, sampleRate C.int,
-	channels C.int, frames C.int, timestampUs C.int64_t) {
+//export goOnEncodedAudio
+func goOnEncodedAudio(userData C.uintptr_t,
+	data *C.uint8_t, dataLen C.int,
+	timestamp C.uint32_t, sequenceNumber C.uint16_t) {
 
 	id := uintptr(userData)
 	cb := getCallbacks(id)
-	if cb == nil || cb.OnAudioFrame == nil {
+	if cb == nil || cb.OnEncodedAudioFrame == nil {
 		return
 	}
 
-	numSamples := int(channels) * int(frames)
-
-	// Copy PCM data to Go slice
-	pcmSlice := make([]int16, numSamples)
-	src := unsafe.Slice((*int16)(unsafe.Pointer(data)), numSamples)
-	copy(pcmSlice, src)
-
-	frame := &AudioFrame{
-		PCM:         pcmSlice,
-		SampleRate:  int(sampleRate),
-		Channels:    int(channels),
-		Frames:      int(frames),
-		TimestampUs: int64(timestampUs),
+	frame := &EncodedAudioFrame{
+		Data:           C.GoBytes(unsafe.Pointer(data), dataLen),
+		Timestamp:      uint32(timestamp),
+		SequenceNumber: uint16(sequenceNumber),
 	}
 
-	cb.OnAudioFrame(frame)
+	cb.OnEncodedAudioFrame(frame)
 }
