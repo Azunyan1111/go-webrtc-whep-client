@@ -30,6 +30,7 @@
 #include "rtc_base/thread.h"
 #include "rtc_base/ref_counted_object.h"
 #include "libyuv/convert_argb.h"
+#include "modules/audio_device/include/fake_audio_device.h"
 
 namespace {
 
@@ -54,7 +55,7 @@ public:
                 network_thread_.get(),
                 worker_thread_.get(),
                 signaling_thread_.get(),
-                nullptr,  // default ADM
+                webrtc::scoped_refptr<webrtc::AudioDeviceModule>(new webrtc::FakeAudioDeviceModule()),  // no speaker output
                 webrtc::CreateBuiltinAudioEncoderFactory(),
                 webrtc::CreateBuiltinAudioDecoderFactory(),
                 webrtc::CreateBuiltinVideoEncoderFactory(),
@@ -321,8 +322,9 @@ public:
         } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
             // Use AudioSinkInterface to get decoded PCM audio
             auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
+            audio_track->set_enabled(false);  // Disable playout to speaker
             audio_track->AddSink(audioSink_.get());
-            NSLog(@"[OnTrack] Audio sink added");
+            NSLog(@"[OnTrack] Audio sink added (playout disabled)");
         }
     }
 
