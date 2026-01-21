@@ -19,30 +19,30 @@ const (
 	codecPrivate = 0x63A2
 )
 
-// EncodedMKVWriter outputs decoded RGBA video and encoded Opus audio to MKV format
+// EncodedMKVWriter outputs decoded RGBA video and PCM audio to MKV format
 type EncodedMKVWriter struct {
-	writer          io.Writer
-	bufWriter       *bufio.Writer
-	width           int
-	height          int
-	sampleRate      int
-	audioChannels   int
-	resolutionKnown bool
-	isHeaderWritten bool
-	videoTrackNum   uint64
-	audioTrackNum   uint64
-	clusterTime     uint64
-	// Base timestamps for video and audio
-	videoBaseTs  int64
-	hasVideoBase bool
-	hasAudioBase bool
-	// Wall clock time for synchronization
-	startWallTime   int64
-	mutex           sync.Mutex
-	done            chan struct{}
-	running         chan struct{}
-	initialized     bool
-	audioFrameCount uint64
+	writer           io.Writer
+	bufWriter        *bufio.Writer
+	width            int
+	height           int
+	sampleRate       int
+	audioChannels    int
+	resolutionKnown  bool
+	isHeaderWritten  bool
+	videoTrackNum    uint64
+	audioTrackNum    uint64
+	clusterTime      uint64
+	baseTimestampUs  int64
+	hasBaseTimestamp bool
+	audioDerivedTsUs int64
+	hasAudioDerived  bool
+	fallbackStartUs  int64
+	hasFallbackStart bool
+	mutex            sync.Mutex
+	done             chan struct{}
+	running          chan struct{}
+	initialized      bool
+	audioFrameCount  uint64
 }
 
 // NewEncodedMKVWriter creates a new EncodedMKVWriter
@@ -89,21 +89,11 @@ func (w *EncodedMKVWriter) WriteVideoFrame(frame *libwebrtc.VideoFrame) error {
 		}
 	}
 
-	// Initialize base timestamp and wall clock time
-	if !w.hasVideoBase {
-		w.videoBaseTs = frame.TimestampUs
-		w.hasVideoBase = true
-		// Use wall clock for synchronization if this is the first frame
-		if w.startWallTime == 0 {
-			w.startWallTime = time.Now().UnixMicro()
-		}
-		DebugLog("Base video timestamp: %d us, wall time: %d us\n", w.videoBaseTs, w.startWallTime)
+	// Calculate timecode using libwebrtc timestamps (fallback to wall clock if missing)
+	timecodeMs, ok := w.timecodeFromTimestamp(frame.TimestampUs, "video")
+	if !ok {
+		timecodeMs = w.fallbackTimecodeMs("video")
 	}
-
-	// Calculate timecode in milliseconds using wall clock time for sync
-	// This ensures playback at correct speed regardless of source timestamps
-	wallElapsed := time.Now().UnixMicro() - w.startWallTime
-	timecodeMs := uint64(wallElapsed / 1000)
 
 	// Convert I420 to RGBA
 	rgba, err := libwebrtc.I420ToRGBA(frame)
@@ -150,19 +140,43 @@ func (w *EncodedMKVWriter) WriteAudioFrame(frame *libwebrtc.AudioFrame) error {
 		return nil
 	}
 
-	// Initialize wall clock time for synchronization
-	if !w.hasAudioBase {
-		w.hasAudioBase = true
-		if w.startWallTime == 0 {
-			w.startWallTime = time.Now().UnixMicro()
+	// Calculate timecode using libwebrtc timestamps (fallback to derived audio PTS)
+	var timecodeMs uint64
+	if frame.TimestampUs > 0 {
+		var ok bool
+		timecodeMs, ok = w.timecodeFromTimestamp(frame.TimestampUs, "audio")
+		if !ok {
+			DebugLog("[AUDIO][MKV] missing audio timestamp despite positive ts_us=%d\n", frame.TimestampUs)
+			return nil
 		}
-		DebugLog("Audio started: %d Hz, %d channels, wall time: %d us\n",
-			frame.SampleRate, frame.Channels, w.startWallTime)
+		w.audioDerivedTsUs = frame.TimestampUs
+		w.hasAudioDerived = true
+	} else {
+		if frame.SampleRate <= 0 || frame.Frames <= 0 {
+			DebugLog("[AUDIO][MKV] invalid audio timing: rate=%d frames=%d\n", frame.SampleRate, frame.Frames)
+			return nil
+		}
+		if !w.hasBaseTimestamp {
+			if frameCount <= 3 || frameCount%50 == 0 {
+				DebugLog("[AUDIO][MKV] drop without base timestamp: count=%d rate=%dHz channels=%d frames=%d\n",
+					frameCount, frame.SampleRate, frame.Channels, frame.Frames)
+			}
+			return nil
+		}
+		if !w.hasAudioDerived {
+			w.audioDerivedTsUs = w.baseTimestampUs
+			w.hasAudioDerived = true
+			DebugLog("[AUDIO][SYNC] start derived audio timestamp at base=%d us\n", w.baseTimestampUs)
+		} else {
+			deltaUs := int64(frame.Frames) * 1_000_000 / int64(frame.SampleRate)
+			w.audioDerivedTsUs += deltaUs
+		}
+		var ok bool
+		timecodeMs, ok = w.timecodeFromBase(w.audioDerivedTsUs, "audio-derived")
+		if !ok {
+			return nil
+		}
 	}
-
-	// Calculate timecode in milliseconds using wall clock time for sync
-	wallElapsed := time.Now().UnixMicro() - w.startWallTime
-	timecodeMs := uint64(wallElapsed / 1000)
 
 	pcmData := frame.PCM
 	if frame.Channels != w.audioChannels {
@@ -463,6 +477,44 @@ func (w *EncodedMKVWriter) writeSimpleBlock(trackNum uint64, data []byte, timeco
 	}
 
 	return nil
+}
+
+func (w *EncodedMKVWriter) timecodeFromTimestamp(timestampUs int64, source string) (uint64, bool) {
+	if timestampUs <= 0 {
+		DebugLog("[SYNC] %s timestamp missing (ts_us=%d)\n", source, timestampUs)
+		return 0, false
+	}
+	if !w.hasBaseTimestamp {
+		w.baseTimestampUs = timestampUs
+		w.hasBaseTimestamp = true
+		DebugLog("[SYNC] base timestamp set by %s: %d us\n", source, timestampUs)
+	} else if timestampUs < w.baseTimestampUs {
+		DebugLog("[SYNC] %s timestamp (%d) < base (%d); adjusting base\n", source, timestampUs, w.baseTimestampUs)
+		w.baseTimestampUs = timestampUs
+	}
+	return uint64((timestampUs - w.baseTimestampUs) / 1000), true
+}
+
+func (w *EncodedMKVWriter) timecodeFromBase(timestampUs int64, source string) (uint64, bool) {
+	if !w.hasBaseTimestamp {
+		DebugLog("[SYNC] base timestamp not set; cannot compute timecode for %s\n", source)
+		return 0, false
+	}
+	if timestampUs < w.baseTimestampUs {
+		DebugLog("[SYNC] %s timestamp (%d) < base (%d); clamping\n", source, timestampUs, w.baseTimestampUs)
+		timestampUs = w.baseTimestampUs
+	}
+	return uint64((timestampUs - w.baseTimestampUs) / 1000), true
+}
+
+func (w *EncodedMKVWriter) fallbackTimecodeMs(source string) uint64 {
+	nowUs := time.Now().UnixMicro()
+	if !w.hasFallbackStart {
+		w.fallbackStartUs = nowUs
+		w.hasFallbackStart = true
+		DebugLog("[SYNC] using wall clock fallback for %s\n", source)
+	}
+	return uint64((nowUs - w.fallbackStartUs) / 1000)
 }
 
 func (w *EncodedMKVWriter) startNewCluster(timecodeMs uint64) error {
