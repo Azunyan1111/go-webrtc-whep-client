@@ -37,11 +37,12 @@ type EncodedMKVWriter struct {
 	hasVideoBase bool
 	hasAudioBase bool
 	// Wall clock time for synchronization
-	startWallTime int64
-	mutex         sync.Mutex
-	done          chan struct{}
-	running       chan struct{}
-	initialized   bool
+	startWallTime   int64
+	mutex           sync.Mutex
+	done            chan struct{}
+	running         chan struct{}
+	initialized     bool
+	audioFrameCount uint64
 }
 
 // NewEncodedMKVWriter creates a new EncodedMKVWriter
@@ -120,6 +121,7 @@ func (w *EncodedMKVWriter) WriteVideoFrame(frame *libwebrtc.VideoFrame) error {
 // WriteAudioFrame writes a decoded PCM audio frame
 func (w *EncodedMKVWriter) WriteAudioFrame(frame *libwebrtc.AudioFrame) error {
 	if frame == nil || len(frame.PCM) == 0 {
+		DebugLog("[AUDIO][MKV] empty frame dropped\n")
 		return nil
 	}
 
@@ -129,19 +131,23 @@ func (w *EncodedMKVWriter) WriteAudioFrame(frame *libwebrtc.AudioFrame) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	// Skip if header not written yet
-	if !w.isHeaderWritten {
-		return nil
-	}
+	w.audioFrameCount++
+	frameCount := w.audioFrameCount
 
-	// Update sample rate and channels from actual frame if different
-	if frame.SampleRate != w.sampleRate || frame.Channels != w.audioChannels {
-		// Note: In a real implementation, we might need to handle sample rate changes
-		// For now, we assume the first frame sets the correct values
-		if !w.hasAudioBase {
-			w.sampleRate = frame.SampleRate
-			w.audioChannels = frame.Channels
+	// Update sample rate and channels before header is written
+	if !w.isHeaderWritten {
+		w.sampleRate = frame.SampleRate
+		w.audioChannels = frame.Channels
+		if frameCount <= 3 || frameCount%50 == 0 {
+			DebugLog("[AUDIO][MKV] drop before header: count=%d rate=%dHz channels=%d frames=%d samples=%d ts_us=%d\n",
+				frameCount,
+				frame.SampleRate,
+				frame.Channels,
+				frame.Frames,
+				len(frame.PCM),
+				frame.TimestampUs)
 		}
+		return nil
 	}
 
 	// Initialize wall clock time for synchronization
@@ -158,13 +164,51 @@ func (w *EncodedMKVWriter) WriteAudioFrame(frame *libwebrtc.AudioFrame) error {
 	wallElapsed := time.Now().UnixMicro() - w.startWallTime
 	timecodeMs := uint64(wallElapsed / 1000)
 
+	pcmData := frame.PCM
+	if frame.Channels != w.audioChannels {
+		switch {
+		case frame.Channels == 1 && w.audioChannels == 2:
+			DebugLog("[AUDIO][MKV] upmix mono to stereo\n")
+			upmixed := make([]int16, len(frame.PCM)*2)
+			for i, sample := range frame.PCM {
+				idx := i * 2
+				upmixed[idx] = sample
+				upmixed[idx+1] = sample
+			}
+			pcmData = upmixed
+		case frame.Channels == 2 && w.audioChannels == 1:
+			DebugLog("[AUDIO][MKV] downmix stereo to mono\n")
+			downmixed := make([]int16, len(frame.PCM)/2)
+			for i := 0; i < len(downmixed); i++ {
+				left := int32(frame.PCM[i*2])
+				right := int32(frame.PCM[i*2+1])
+				downmixed[i] = int16((left + right) / 2)
+			}
+			pcmData = downmixed
+		default:
+			DebugLog("[AUDIO][MKV] unsupported channel conversion: in=%d out=%d\n", frame.Channels, w.audioChannels)
+			return nil
+		}
+	}
+
 	// Convert PCM int16 to bytes (little-endian)
-	pcmBytes := make([]byte, len(frame.PCM)*2)
-	for i, sample := range frame.PCM {
+	pcmBytes := make([]byte, len(pcmData)*2)
+	for i, sample := range pcmData {
 		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(sample))
 	}
 
-	return w.writeSimpleBlock(w.audioTrackNum, pcmBytes, timecodeMs, false)
+	if frameCount <= 3 || frameCount%50 == 0 {
+		DebugLog("[AUDIO][MKV] write frame: count=%d rate=%dHz channels=%d frames=%d bytes=%d timecodeMs=%d ts_us=%d\n",
+			frameCount,
+			frame.SampleRate,
+			w.audioChannels,
+			frame.Frames,
+			len(pcmBytes),
+			timecodeMs,
+			frame.TimestampUs)
+	}
+
+	return w.writeSimpleBlock(w.audioTrackNum, pcmBytes, timecodeMs, true)
 }
 
 // Run starts the main loop
@@ -173,6 +217,7 @@ func (w *EncodedMKVWriter) Run() error {
 	w.initialized = true
 	w.mutex.Unlock()
 	close(w.running)
+	DebugLog("[MKV] writer started\n")
 
 	// Keep running until Stop() is called
 	<-w.done
@@ -232,6 +277,8 @@ func (w *EncodedMKVWriter) writeHeaders() error {
 		return fmt.Errorf("failed to flush headers: %w", err)
 	}
 	w.isHeaderWritten = true
+	DebugLog("[MKV] headers written: video=%dx%d audio=%dHz/%dch codec=A_PCM/INT/LIT\n",
+		w.width, w.height, w.sampleRate, w.audioChannels)
 
 	return nil
 }

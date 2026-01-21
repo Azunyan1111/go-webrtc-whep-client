@@ -10,11 +10,16 @@
 #include <condition_variable>
 #include <cstring>
 #include <optional>
+#include <algorithm>
+#include <cmath>
+#include <vector>
 
 #include "api/peer_connection_interface.h"
 #include "api/create_peerconnection_factory.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
+#include "api/audio/create_audio_device_module.h"
+#include "api/environment/environment_factory.h"
 #include "api/video_codecs/builtin_video_decoder_factory.h"
 #include "api/video_codecs/builtin_video_encoder_factory.h"
 #include "api/video/video_frame.h"
@@ -50,11 +55,24 @@ public:
             signaling_thread_->SetName("signaling_thread", nullptr);
             signaling_thread_->Start();
 
+            env_.emplace(webrtc::CreateEnvironment());
+            audio_device_ = webrtc::CreateAudioDeviceModule(
+                *env_, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+            if (audio_device_) {
+                NSLog(@"[AudioDevice] Using platform default audio device");
+                int init_result = audio_device_->Init();
+                int speaker_result = audio_device_->SetSpeakerMute(true);
+                int mic_result = audio_device_->SetMicrophoneMute(true);
+                NSLog(@"[AudioDevice] Init=%d speakerMute=%d micMute=%d", init_result, speaker_result, mic_result);
+            } else {
+                NSLog(@"[AudioDevice] Failed to create audio device module");
+            }
+
             factory_ = webrtc::CreatePeerConnectionFactory(
                 network_thread_.get(),
                 worker_thread_.get(),
                 signaling_thread_.get(),
-                nullptr,  // no AudioDeviceModule = no speaker output
+                audio_device_,
                 webrtc::CreateBuiltinAudioEncoderFactory(),
                 webrtc::CreateBuiltinAudioDecoderFactory(),
                 webrtc::CreateBuiltinVideoEncoderFactory(),
@@ -81,6 +99,8 @@ private:
     std::unique_ptr<webrtc::Thread> network_thread_;
     std::unique_ptr<webrtc::Thread> worker_thread_;
     std::unique_ptr<webrtc::Thread> signaling_thread_;
+    std::optional<webrtc::Environment> env_;
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_;
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
 };
 
@@ -120,20 +140,63 @@ public:
     AudioSinkImpl(uintptr_t userData, OnAudioDataCallback callback)
         : userData_(userData), callback_(callback) {}
 
+    int NumPreferredChannels() const override { return 2; }
+
+    void OnData(const void* audio_data,
+                int bits_per_sample,
+                int sample_rate,
+                size_t number_of_channels,
+                size_t number_of_frames) override {
+        OnData(audio_data,
+            bits_per_sample,
+            sample_rate,
+            number_of_channels,
+            number_of_frames,
+            std::nullopt);
+    }
+
     void OnData(const void* audio_data,
                 int bits_per_sample,
                 int sample_rate,
                 size_t number_of_channels,
                 size_t number_of_frames,
                 std::optional<int64_t> absolute_capture_timestamp_ms) override {
-        if (!callback_) return;
-
-        // libwebrtc always provides 16-bit PCM
-        if (bits_per_sample != 16) {
+        if (!callback_) {
+            NSLog(@"[AudioSink] callback is null; dropping audio");
             return;
         }
 
-        const int16_t* pcm_data = static_cast<const int16_t*>(audio_data);
+        static unsigned long long audio_log_count = 0;
+        audio_log_count++;
+        if (audio_log_count <= 3 || audio_log_count % 100 == 0) {
+            long long ts_ms = absolute_capture_timestamp_ms.has_value() ?
+                static_cast<long long>(absolute_capture_timestamp_ms.value()) : -1;
+            NSLog(@"[AudioSink] OnData count=%llu bits=%d rate=%dHz channels=%zu frames=%zu ts_ms=%lld",
+                audio_log_count,
+                bits_per_sample,
+                sample_rate,
+                number_of_channels,
+                number_of_frames,
+                ts_ms);
+        }
+
+        const int16_t* pcm_data = nullptr;
+        std::vector<int16_t> converted;
+        if (bits_per_sample == 16) {
+            pcm_data = static_cast<const int16_t*>(audio_data);
+        } else if (bits_per_sample == 32) {
+            const float* float_data = static_cast<const float*>(audio_data);
+            size_t total_samples = number_of_channels * number_of_frames;
+            converted.resize(total_samples);
+            for (size_t i = 0; i < total_samples; ++i) {
+                float sample = std::max(-1.0f, std::min(1.0f, float_data[i]));
+                converted[i] = static_cast<int16_t>(std::lrintf(sample * 32767.0f));
+            }
+            pcm_data = converted.data();
+        } else {
+            NSLog(@"[AudioSink] Unsupported bits_per_sample=%d; dropping audio", bits_per_sample);
+            return;
+        }
 
         // Convert timestamp to microseconds
         int64_t timestamp_us = 0;
@@ -321,9 +384,14 @@ public:
         } else if (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) {
             // Use AudioSinkInterface to get decoded PCM audio
             auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
-            audio_track->set_enabled(false);  // Disable playout to speaker
-            audio_track->AddSink(audioSink_.get());
-            NSLog(@"[OnTrack] Audio sink added (playout disabled)");
+            audio_track->set_enabled(false);
+            if (auto* source = audio_track->GetSource()) {
+                source->AddSink(audioSink_.get());
+                NSLog(@"[OnTrack] Audio sink added (source)");
+            } else {
+                audio_track->AddSink(audioSink_.get());
+                NSLog(@"[OnTrack] Audio sink added (track)");
+            }
         }
     }
 

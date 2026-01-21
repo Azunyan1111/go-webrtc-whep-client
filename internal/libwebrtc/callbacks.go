@@ -4,7 +4,12 @@ package libwebrtc
 #include <stdint.h>
 */
 import "C"
-import "unsafe"
+import (
+	"sync/atomic"
+	"unsafe"
+)
+
+var audioCallbackCount uint64
 
 // These functions are called from C code
 
@@ -71,9 +76,16 @@ func goOnAudioData(userData C.uintptr_t,
 
 	id := uintptr(userData)
 	cb := getCallbacks(id)
-	if cb == nil || cb.OnAudioFrame == nil {
+	if cb == nil {
+		DebugLog("[AUDIO][Go] callbacks not found: id=%d\n", id)
 		return
 	}
+	if cb.OnAudioFrame == nil {
+		DebugLog("[AUDIO][Go] OnAudioFrame is nil: id=%d\n", id)
+		return
+	}
+
+	count := atomic.AddUint64(&audioCallbackCount, 1)
 
 	// Calculate total samples
 	numSamples := int(frames) * int(channels)
@@ -83,6 +95,11 @@ func goOnAudioData(userData C.uintptr_t,
 	src := (*[1 << 28]C.int16_t)(unsafe.Pointer(data))[:numSamples:numSamples]
 	for i := 0; i < numSamples; i++ {
 		pcmData[i] = int16(src[i])
+	}
+
+	if count <= 3 || count%100 == 0 {
+		DebugLog("[AUDIO][Go] onAudioData: count=%d rate=%dHz channels=%d frames=%d samples=%d ts_us=%d\n",
+			count, int(sampleRate), int(channels), int(frames), numSamples, int64(timestampUs))
 	}
 
 	frame := &AudioFrame{

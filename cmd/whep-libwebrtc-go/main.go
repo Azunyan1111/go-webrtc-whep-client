@@ -58,7 +58,10 @@ func main() {
 
 	if debugMode {
 		mkvwriter.DebugLog = func(format string, args ...interface{}) {
-			fmt.Fprintf(os.Stderr, "[DEBUG] "+format, args...)
+			fmt.Fprintf(os.Stderr, "[DEBUG][MKV] "+format, args...)
+		}
+		libwebrtc.DebugLog = func(format string, args ...interface{}) {
+			fmt.Fprintf(os.Stderr, "[DEBUG][LIBWEBRTC] "+format, args...)
 		}
 	}
 
@@ -97,6 +100,9 @@ func run() error {
 	// Last frame received time for stream timeout detection
 	var lastFrameTime atomic.Value
 	lastFrameTime.Store(time.Now())
+	var lastAudioTime atomic.Value
+	lastAudioTime.Store(time.Time{})
+	var audioFrameCount atomic.Int64
 
 	// Create callbacks
 	callbacks := &libwebrtc.Callbacks{
@@ -125,6 +131,22 @@ func run() error {
 			}
 		},
 		OnAudioFrame: func(frame *libwebrtc.AudioFrame) {
+			lastFrameTime.Store(time.Now())
+			lastAudioTime.Store(time.Now())
+			count := audioFrameCount.Add(1)
+			mediaOnce.Do(func() {
+				close(mediaReceived)
+			})
+			if debugMode && (count <= 3 || count%50 == 0) {
+				fmt.Fprintf(os.Stderr,
+					"[AUDIO][APP] recv: count=%d rate=%dHz channels=%d frames=%d samples=%d ts_us=%d\n",
+					count,
+					frame.SampleRate,
+					frame.Channels,
+					frame.Frames,
+					len(frame.PCM),
+					frame.TimestampUs)
+			}
 			if err := mkvWriter.WriteAudioFrame(frame); err != nil {
 				if debugMode {
 					fmt.Fprintf(os.Stderr, "Audio write error: %v\n", err)
@@ -233,6 +255,7 @@ func run() error {
 	// Stream timeout ticker
 	streamTimeoutTicker := time.NewTicker(streamTimeoutCheckFreq)
 	defer streamTimeoutTicker.Stop()
+	lastAudioLogTime := time.Time{}
 
 	// Main loop with stream timeout detection
 	for {
@@ -253,6 +276,19 @@ func run() error {
 				fmt.Fprintln(os.Stderr, "Stream timeout, no frames received...")
 				mkvWriter.Close()
 				return fmt.Errorf("stream timeout: no frames received for %v", streamTimeout)
+			}
+			if debugMode {
+				now := time.Now()
+				if lastAudioLogTime.IsZero() || now.Sub(lastAudioLogTime) >= 5*time.Second {
+					lastAudioLogTime = now
+					lastAudio := lastAudioTime.Load().(time.Time)
+					if lastAudio.IsZero() {
+						fmt.Fprintln(os.Stderr, "[AUDIO][APP] no audio frames received yet")
+					} else {
+						age := now.Sub(lastAudio)
+						fmt.Fprintf(os.Stderr, "[AUDIO][APP] last audio %v ago (total=%d)\n", age, audioFrameCount.Load())
+					}
+				}
 			}
 		}
 	}

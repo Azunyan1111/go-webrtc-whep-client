@@ -164,15 +164,11 @@ func (w *DecodedMKVWriter) WriteAudioFrame(frame *libwebrtc.AudioFrame) error {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 
-	// Skip if header not written yet
+	// Update audio parameters before header is written
 	if !w.isHeaderWritten {
-		return nil
-	}
-
-	// Update audio parameters if different
-	if frame.SampleRate != w.sampleRate || frame.Channels != w.audioChannels {
 		w.sampleRate = frame.SampleRate
 		w.audioChannels = frame.Channels
+		return nil
 	}
 
 	// Initialize base timestamp and wall clock time
@@ -190,13 +186,37 @@ func (w *DecodedMKVWriter) WriteAudioFrame(frame *libwebrtc.AudioFrame) error {
 	wallElapsed := time.Now().UnixMicro() - w.startWallTime
 	timecodeMs := uint64(wallElapsed / 1000)
 
+	pcmData := frame.PCM
+	if frame.Channels != w.audioChannels {
+		switch {
+		case frame.Channels == 1 && w.audioChannels == 2:
+			upmixed := make([]int16, len(frame.PCM)*2)
+			for i, sample := range frame.PCM {
+				idx := i * 2
+				upmixed[idx] = sample
+				upmixed[idx+1] = sample
+			}
+			pcmData = upmixed
+		case frame.Channels == 2 && w.audioChannels == 1:
+			downmixed := make([]int16, len(frame.PCM)/2)
+			for i := 0; i < len(downmixed); i++ {
+				left := int32(frame.PCM[i*2])
+				right := int32(frame.PCM[i*2+1])
+				downmixed[i] = int16((left + right) / 2)
+			}
+			pcmData = downmixed
+		default:
+			return nil
+		}
+	}
+
 	// Convert int16 PCM to bytes (little-endian)
-	data := make([]byte, len(frame.PCM)*2)
-	for i, sample := range frame.PCM {
+	data := make([]byte, len(pcmData)*2)
+	for i, sample := range pcmData {
 		binary.LittleEndian.PutUint16(data[i*2:], uint16(sample))
 	}
 
-	return w.writeSimpleBlock(w.audioTrackNum, data, timecodeMs, false)
+	return w.writeSimpleBlock(w.audioTrackNum, data, timecodeMs, true)
 }
 
 // Run starts the main loop
