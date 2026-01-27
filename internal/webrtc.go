@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/videoframe"
 	"github.com/pion/webrtc/v4"
 )
 
@@ -118,6 +119,13 @@ func CreatePeerConnection(mediaEngine *webrtc.MediaEngine, eventChan chan<- Conn
 	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptorRegistry); err != nil {
 		return nil, err
 	}
+
+	// Register videoframe interceptor for VP8 frame assembly
+	vfFactory, err := videoframe.NewReceiverInterceptor()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create videoframe interceptor: %w", err)
+	}
+	interceptorRegistry.Add(vfFactory)
 
 	// Create the API object
 	api := webrtc.NewAPI(

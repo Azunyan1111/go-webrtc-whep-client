@@ -11,6 +11,8 @@ require (
 	github.com/spf13/pflag v1.0.10
 )
 
+replace github.com/pion/interceptor => github.com/Azunyan1111/interceptor v0.0.0-20260126231723-d28190ee52d8
+
 require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect

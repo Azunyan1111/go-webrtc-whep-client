@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pion/interceptor"
+	"github.com/pion/interceptor/pkg/videoframe"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 )
@@ -31,6 +32,7 @@ type StreamManager struct {
 	currentTimeout  time.Duration   // 現在のタイムアウト値
 	mediaReceivedCh chan<- struct{} // 最初のメディア受信通知用
 	firstMediaSent  bool            // 通知済みフラグ
+	seenKeyFrame    bool            // videoframe用: キーフレーム受信済みフラグ
 }
 
 // rtpReadResult はReadRTPの結果を格納
@@ -227,7 +229,7 @@ func (sm *StreamManager) processVideoStream() {
 		default:
 		}
 
-		rtpPacket, _, err := sm.readRTPWithTimeout(sm.videoTrack)
+		rtpPacket, attrs, err := sm.readRTPWithTimeout(sm.videoTrack)
 		if err != nil {
 			if err == io.EOF {
 				return
@@ -242,7 +244,37 @@ func (sm *StreamManager) processVideoStream() {
 		// 最初のメディア受信を通知
 		sm.notifyMediaReceived()
 
-		// RTPパケットを処理
+		// videoframe interceptorからEncodedFrameを取得（VP8の場合）
+		if sm.codecType == "vp8" && attrs != nil {
+			if val := attrs.Get(videoframe.EncodedFramesKey); val != nil {
+				if encodedFrames, ok := val.([]*videoframe.EncodedFrame); ok && len(encodedFrames) > 0 {
+					for _, frame := range encodedFrames {
+						keyframe := frame.FrameType == videoframe.FrameTypeKey
+
+						// キーフレームをまだ見ていない場合はスキップ
+						if !sm.seenKeyFrame {
+							if keyframe {
+								sm.seenKeyFrame = true
+								DebugLog("videoframe: First keyframe received, ID=%d, Size=%d\n", frame.ID, len(frame.Data))
+							} else {
+								continue // キーフレーム前のデルタフレームはスキップ
+							}
+						}
+
+						if err := sm.writer.WriteVideoFrame(frame.Data, frame.Timestamp, keyframe); err != nil {
+							select {
+							case sm.errChan <- fmt.Errorf("error writing video frame: %w", err):
+							case <-sm.done:
+							}
+							return
+						}
+					}
+					continue
+				}
+			}
+		}
+
+		// フォールバック: 従来のRTPプロセッサを使用
 		frames, err := sm.processor.ProcessRTPPacket(rtpPacket, sm.codecType)
 		if err != nil {
 			select {
@@ -332,4 +364,52 @@ func (sm *StreamManager) isKeyframe(frame []byte, codecType string) bool {
 	}
 
 	return false
+}
+
+// stripVP8PayloadDescriptor はVP8 RTPペイロードデスクリプタを除去してビットストリームを取得
+// RFC 7741に基づく
+func stripVP8PayloadDescriptor(data []byte) []byte {
+	if len(data) < 1 {
+		return data
+	}
+
+	headerSize := 1
+	firstByte := data[0]
+
+	// X bit - extension present
+	if firstByte&0x80 != 0 {
+		if len(data) < 2 {
+			return data
+		}
+		headerSize++
+		extByte := data[1]
+
+		// I bit - PictureID present
+		if extByte&0x80 != 0 {
+			headerSize++
+			if len(data) < headerSize {
+				return data
+			}
+			// M bit - PictureID is 16 bits
+			if data[headerSize-1]&0x80 != 0 {
+				headerSize++
+			}
+		}
+
+		// L bit - TL0PICIDX present
+		if extByte&0x40 != 0 {
+			headerSize++
+		}
+
+		// T or K bit - TID/KEYIDX present
+		if extByte&0x20 != 0 || extByte&0x10 != 0 {
+			headerSize++
+		}
+	}
+
+	if len(data) <= headerSize {
+		return data
+	}
+
+	return data[headerSize:]
 }
