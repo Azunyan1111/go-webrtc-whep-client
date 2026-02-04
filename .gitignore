@@ -5,9 +5,3 @@ CLAUDE.md
 go-webrtc-whep-client
 whep-go
 whip-go
-whep-libwebrtc-go
-
-# WebRTC builds
-webrtc-macos-arm64/
-webrtc-ubuntu-x86_64/
-webrtc.*.tar.gz
