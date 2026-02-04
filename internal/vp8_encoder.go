@@ -8,14 +8,15 @@ import (
 )
 
 type VP8Encoder struct {
-	ctx    *vpx.CodecCtx
-	img    *vpx.Image
-	width  int
-	height int
-	pts    int64
+	ctx         *vpx.CodecCtx
+	img         *vpx.Image
+	width       int
+	height      int
+	pts         int64
+	pixelFormat string
 }
 
-func NewVP8Encoder(width, height int) (*VP8Encoder, error) {
+func NewVP8Encoder(width, height int, pixelFormat string) (*VP8Encoder, error) {
 	ctx := vpx.NewCodecCtx()
 	if ctx == nil {
 		return nil, fmt.Errorf("failed to create codec context")
@@ -60,30 +61,41 @@ func NewVP8Encoder(width, height int) (*VP8Encoder, error) {
 	}
 	img.Deref()
 
-	DebugLog("VP8Encoder: requested %dx%d, image W=%d H=%d DW=%d DH=%d\n",
-		width, height, img.W, img.H, img.DW, img.DH)
+	DebugLog("VP8Encoder: requested %dx%d, image W=%d H=%d DW=%d DH=%d, pixelFormat=%s\n",
+		width, height, img.W, img.H, img.DW, img.DH, pixelFormat)
 
 	return &VP8Encoder{
-		ctx:    ctx,
-		img:    img,
-		width:  width,
-		height: height,
-		pts:    0,
+		ctx:         ctx,
+		img:         img,
+		width:       width,
+		height:      height,
+		pts:         0,
+		pixelFormat: pixelFormat,
 	}, nil
 }
 
-func (e *VP8Encoder) Encode(rgba []byte) ([]byte, bool, error) {
+func (e *VP8Encoder) Encode(frameData []byte) ([]byte, bool, error) {
 	// Use image's actual dimensions (DW, DH) for size check
 	w := int(e.img.DW)
 	h := int(e.img.DH)
-	expectedSize := w * h * 4
-	if len(rgba) != expectedSize {
-		DebugLog("Invalid RGBA data size: expected %d (%dx%dx4), got %d\n", expectedSize, w, h, len(rgba))
-		return nil, false, fmt.Errorf("invalid RGBA data size: expected %d, got %d", expectedSize, len(rgba))
-	}
 
-	// Convert RGBA to I420
-	e.rgbaToI420(rgba)
+	switch e.pixelFormat {
+	case "YUV420P", "I420":
+		expectedSize := w * h * 3 / 2
+		if len(frameData) != expectedSize {
+			DebugLog("Invalid YUV420P data size: expected %d (%dx%dx3/2), got %d\n", expectedSize, w, h, len(frameData))
+			return nil, false, fmt.Errorf("invalid YUV420P data size: expected %d, got %d", expectedSize, len(frameData))
+		}
+		e.yuv420pToI420(frameData)
+	default:
+		// RGBA (default)
+		expectedSize := w * h * 4
+		if len(frameData) != expectedSize {
+			DebugLog("Invalid RGBA data size: expected %d (%dx%dx4), got %d\n", expectedSize, w, h, len(frameData))
+			return nil, false, fmt.Errorf("invalid RGBA data size: expected %d, got %d", expectedSize, len(frameData))
+		}
+		e.rgbaToI420(frameData)
+	}
 
 	// Encode frame
 	if err := vpx.Error(vpx.CodecEncode(e.ctx, e.img, vpx.CodecPts(e.pts), 1, 0, vpx.DlGoodQuality)); err != nil {
@@ -163,6 +175,45 @@ func (e *VP8Encoder) rgbaToI420(rgba []byte) {
 				vPlane[uvRow*vStride+uvCol] = byte(vVal)
 			}
 		}
+	}
+}
+
+func (e *VP8Encoder) yuv420pToI420(yuv []byte) {
+	h := int(e.img.DH)
+	w := int(e.img.DW)
+
+	yStride := int(e.img.Stride[vpx.PlaneY])
+	uStride := int(e.img.Stride[vpx.PlaneU])
+	vStride := int(e.img.Stride[vpx.PlaneV])
+
+	// Access planes directly via unsafe.Pointer
+	yPlane := (*(*[1 << 30]byte)(unsafe.Pointer(e.img.Planes[vpx.PlaneY])))[:yStride*h]
+	uPlane := (*(*[1 << 30]byte)(unsafe.Pointer(e.img.Planes[vpx.PlaneU])))[:uStride*h/2]
+	vPlane := (*(*[1 << 30]byte)(unsafe.Pointer(e.img.Planes[vpx.PlaneV])))[:vStride*h/2]
+
+	// YUV420P layout: Y plane, then U plane, then V plane
+	ySize := w * h
+	uvSize := w * h / 4
+
+	srcY := yuv[:ySize]
+	srcU := yuv[ySize : ySize+uvSize]
+	srcV := yuv[ySize+uvSize : ySize+2*uvSize]
+
+	// Copy Y plane (row by row to handle stride)
+	for row := 0; row < h; row++ {
+		copy(yPlane[row*yStride:row*yStride+w], srcY[row*w:(row+1)*w])
+	}
+
+	// Copy U plane
+	uvH := h / 2
+	uvW := w / 2
+	for row := 0; row < uvH; row++ {
+		copy(uPlane[row*uStride:row*uStride+uvW], srcU[row*uvW:(row+1)*uvW])
+	}
+
+	// Copy V plane
+	for row := 0; row < uvH; row++ {
+		copy(vPlane[row*vStride:row*vStride+uvW], srcV[row*uvW:(row+1)*uvW])
 	}
 }
 

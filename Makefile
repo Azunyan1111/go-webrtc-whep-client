@@ -9,7 +9,7 @@
 #   vet              - Run go vet
 #   test             - Run tests
 
-.PHONY: all whep-go whip-go clean fmt vet test help
+.PHONY: all whep-go whip-go clean fmt vet test help docker-linux-amd64
 
 # Configuration
 GO := go
@@ -35,6 +35,7 @@ help:
 	@echo "  all                 Build whep-go and whip-go (pion/webrtc based)"
 	@echo "  whep-go             Build WHEP client (pion/webrtc)"
 	@echo "  whip-go             Build WHIP client"
+	@echo "  docker-linux-amd64  Build for Ubuntu/Linux AMD64 using Docker"
 	@echo "  clean               Remove built binaries"
 	@echo "  fmt                 Format Go code"
 	@echo "  vet                 Run go vet"
@@ -49,6 +50,14 @@ whep-go:
 # Build WHIP client
 whip-go:
 	$(GO) build $(GOFLAGS) -o $(WHIP_GO) ./cmd/whip-go
+
+# Build for Ubuntu/Linux AMD64 using Docker
+docker-linux-amd64:
+	docker build --platform linux/amd64 --target test -t go-webrtc-whep-client-builder -f Dockerfile.build .
+	docker create --name go-webrtc-whep-client-tmp go-webrtc-whep-client-builder
+	docker cp go-webrtc-whep-client-tmp:/app/whep-go-linux-amd64 ./
+	docker cp go-webrtc-whep-client-tmp:/app/whip-go-linux-amd64 ./
+	docker rm go-webrtc-whep-client-tmp
 
 # Format Go code
 fmt:
@@ -65,6 +74,7 @@ test:
 # Clean built binaries
 clean:
 	rm -f $(WHEP_GO) $(WHIP_GO)
+	rm -f $(WHEP_GO)-linux-amd64 $(WHIP_GO)-linux-amd64
 	rm -f go-webrtc-whep-client
 
 # Development helpers

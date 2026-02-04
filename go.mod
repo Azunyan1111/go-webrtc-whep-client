@@ -7,11 +7,14 @@ require (
 	github.com/pion/interceptor v0.1.43
 	github.com/pion/rtp v1.10.0
 	github.com/pion/webrtc/v4 v4.2.3
+	github.com/qrtc/opus-go v0.0.1
 	github.com/remko/go-mkvparse v0.14.0
 	github.com/spf13/pflag v1.0.10
 )
 
 replace github.com/pion/interceptor => github.com/Azunyan1111/interceptor v0.0.0-20260126231723-d28190ee52d8
+
+replace github.com/qrtc/opus-go => github.com/Azunyan1111/opus-go v0.0.2
 
 require (
 	github.com/google/uuid v1.6.0 // indirect

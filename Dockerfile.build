@@ -1,0 +1,24 @@
+FROM golang:1.24.2-bookworm AS builder
+
+WORKDIR /app
+
+# Copy go mod files first for caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build binaries
+RUN go build -v -o whep-go-linux-amd64 ./cmd/whep-go && \
+    go build -v -o whip-go-linux-amd64 ./cmd/whip-go
+
+# Test stage
+FROM debian:bookworm-slim AS test
+
+WORKDIR /app
+
+COPY --from=builder /app/whep-go-linux-amd64 ./
+COPY --from=builder /app/whip-go-linux-amd64 ./
+
+RUN ./whep-go-linux-amd64 --help && ./whip-go-linux-amd64 --help

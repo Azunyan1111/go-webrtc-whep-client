@@ -33,6 +33,10 @@ type MKVReader struct {
 	frames           chan *Frame
 	err              error
 	started          bool
+	pixelFormat      string
+	audioCodec       string
+	audioSampleRate  int
+	audioChannels    int
 }
 
 func NewMKVReader(reader io.Reader) *MKVReader {
@@ -42,6 +46,7 @@ func NewMKVReader(reader io.Reader) *MKVReader {
 		timescale:        1000000, // Default to 1ms
 		videoTrackNumber: -1,
 		audioTrackNumber: -1,
+		pixelFormat:      "RGBA",
 	}
 }
 
@@ -51,6 +56,22 @@ func (r *MKVReader) VideoWidth() int {
 
 func (r *MKVReader) VideoHeight() int {
 	return r.videoHeight
+}
+
+func (r *MKVReader) PixelFormat() string {
+	return r.pixelFormat
+}
+
+func (r *MKVReader) AudioCodec() string {
+	return r.audioCodec
+}
+
+func (r *MKVReader) AudioSampleRate() int {
+	return r.audioSampleRate
+}
+
+func (r *MKVReader) AudioChannels() int {
+	return r.audioChannels
 }
 
 func (r *MKVReader) Start() {
@@ -93,6 +114,7 @@ type mkvHandler struct {
 	inTrackEntry       bool
 	inVideo            bool
 	inAudio            bool
+	inColour           bool
 }
 
 func (h *mkvHandler) HandleMasterBegin(id mkvparse.ElementID, info mkvparse.ElementInfo) (bool, error) {
@@ -105,6 +127,8 @@ func (h *mkvHandler) HandleMasterBegin(id mkvparse.ElementID, info mkvparse.Elem
 		h.inVideo = true
 	case mkvparse.AudioElement:
 		h.inAudio = true
+	case mkvparse.ColourElement:
+		h.inColour = true
 	case mkvparse.ClusterElement:
 		// Reset cluster time
 	}
@@ -117,8 +141,9 @@ func (h *mkvHandler) HandleMasterEnd(id mkvparse.ElementID, info mkvparse.Elemen
 		if h.currentTrackType == "V_UNCOMPRESSED" || h.currentTrackType == "V_VP8" || h.currentTrackType == "V_VP9" {
 			h.reader.videoTrackNumber = h.currentTrackNumber
 			DebugLog("Video track number: %d, codec: %s\n", h.currentTrackNumber, h.currentTrackType)
-		} else if h.currentTrackType == "A_OPUS" {
+		} else if h.currentTrackType == "A_OPUS" || h.currentTrackType == "A_PCM/INT/LIT" {
 			h.reader.audioTrackNumber = h.currentTrackNumber
+			h.reader.audioCodec = h.currentTrackType
 			DebugLog("Audio track number: %d, codec: %s\n", h.currentTrackNumber, h.currentTrackType)
 		}
 		h.inTrackEntry = false
@@ -126,6 +151,8 @@ func (h *mkvHandler) HandleMasterEnd(id mkvparse.ElementID, info mkvparse.Elemen
 		h.inVideo = false
 	case mkvparse.AudioElement:
 		h.inAudio = false
+	case mkvparse.ColourElement:
+		h.inColour = false
 	}
 	return nil
 }
@@ -148,6 +175,22 @@ func (h *mkvHandler) HandleInteger(id mkvparse.ElementID, value int64, info mkvp
 		h.currentClusterTime = value
 	case mkvparse.TimecodeScaleElement:
 		h.reader.timescale = uint64(value)
+	case mkvparse.ChannelsElement:
+		if h.inAudio {
+			h.reader.audioChannels = int(value)
+			DebugLog("Audio channels: %d\n", value)
+		}
+	}
+	return nil
+}
+
+func (h *mkvHandler) HandleFloat(id mkvparse.ElementID, value float64, info mkvparse.ElementInfo) error {
+	switch id {
+	case mkvparse.SamplingFrequencyElement:
+		if h.inAudio {
+			h.reader.audioSampleRate = int(value)
+			DebugLog("Audio sample rate: %d\n", int(value))
+		}
 	}
 	return nil
 }
@@ -168,6 +211,11 @@ func (h *mkvHandler) HandleBinary(id mkvparse.ElementID, data []byte, info mkvpa
 		return h.handleSimpleBlock(data)
 	case mkvparse.BlockElement:
 		return h.handleSimpleBlock(data)
+	case mkvparse.ColourSpaceElement:
+		if h.inVideo {
+			h.reader.pixelFormat = string(data)
+			DebugLog("Video pixel format: %s\n", string(data))
+		}
 	}
 	return nil
 }

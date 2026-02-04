@@ -62,10 +62,41 @@ func run() error {
 	if width == 0 || height == 0 {
 		return fmt.Errorf("could not determine video dimensions")
 	}
-	fmt.Fprintf(os.Stderr, "Video resolution: %dx%d\n", width, height)
+	pixelFormat := mkvReader.PixelFormat()
+	fmt.Fprintf(os.Stderr, "Video resolution: %dx%d, pixel format: %s\n", width, height, pixelFormat)
+
+	// Check audio codec
+	audioCodec := mkvReader.AudioCodec()
+	needsOpusEncode := (audioCodec == "A_PCM/INT/LIT")
+	if audioCodec != "" {
+		fmt.Fprintf(os.Stderr, "Audio codec: %s\n", audioCodec)
+		if needsOpusEncode {
+			fmt.Fprintf(os.Stderr, "PCM audio detected, will encode to Opus\n")
+		}
+	}
+
+	// Create Opus encoder if needed
+	var opusEncoder *internal.OpusEncoder
+	if needsOpusEncode {
+		sampleRate := mkvReader.AudioSampleRate()
+		channels := mkvReader.AudioChannels()
+		if sampleRate == 0 {
+			sampleRate = 48000
+		}
+		if channels == 0 {
+			channels = 2
+		}
+		fmt.Fprintf(os.Stderr, "Audio: %dHz, %d channels\n", sampleRate, channels)
+		var opusErr error
+		opusEncoder, opusErr = internal.NewOpusEncoder(sampleRate, channels)
+		if opusErr != nil {
+			return fmt.Errorf("failed to create Opus encoder: %v", opusErr)
+		}
+		defer opusEncoder.Close()
+	}
 
 	// Create VP8 encoder
-	encoder, err := internal.NewVP8Encoder(width, height)
+	encoder, err := internal.NewVP8Encoder(width, height, pixelFormat)
 	if err != nil {
 		return fmt.Errorf("failed to create VP8 encoder: %v", err)
 	}
@@ -212,10 +243,29 @@ func run() error {
 			}
 
 		case internal.FrameTypeAudio:
-			packet := audioPacketizer.Packetize(frame.Data, frame.TimestampMs)
-			if packet != nil {
-				if err := audioTrack.WriteRTP(packet); err != nil {
-					internal.DebugLog("Error writing audio RTP: %v\n", err)
+			if needsOpusEncode && opusEncoder != nil {
+				// PCM -> Opus encoding
+				encodedFrames, err := opusEncoder.Encode(frame.Data, frame.TimestampMs)
+				if err != nil {
+					internal.DebugLog("Error encoding audio: %v\n", err)
+					continue
+				}
+				for _, encoded := range encodedFrames {
+					// Use the timestamp from each encoded frame (increments by 10ms per frame)
+					packet := audioPacketizer.Packetize(encoded.Data, encoded.TimestampMs)
+					if packet != nil {
+						if err := audioTrack.WriteRTP(packet); err != nil {
+							internal.DebugLog("Error writing audio RTP: %v\n", err)
+						}
+					}
+				}
+			} else {
+				// Already Opus, pass through
+				packet := audioPacketizer.Packetize(frame.Data, frame.TimestampMs)
+				if packet != nil {
+					if err := audioTrack.WriteRTP(packet); err != nil {
+						internal.DebugLog("Error writing audio RTP: %v\n", err)
+					}
 				}
 			}
 			audioCount++
