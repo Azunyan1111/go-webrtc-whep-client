@@ -33,6 +33,9 @@ type StreamManager struct {
 	mediaReceivedCh chan<- struct{} // 最初のメディア受信通知用
 	firstMediaSent  bool            // 通知済みフラグ
 	seenKeyFrame    bool            // videoframe用: キーフレーム受信済みフラグ
+	lastFrameID     int64           // 最後に処理したフレームID（ギャップ検出用）
+	frameCount      int64           // 受信フレーム総数
+	droppedFrames   int64           // ドロップされたフレーム数（ギャップから推定）
 }
 
 // rtpReadResult はReadRTPの結果を格納
@@ -255,10 +258,31 @@ func (sm *StreamManager) processVideoStream() {
 						if !sm.seenKeyFrame {
 							if keyframe {
 								sm.seenKeyFrame = true
+								sm.lastFrameID = frame.ID
 								DebugLog("videoframe: First keyframe received, ID=%d, Size=%d\n", frame.ID, len(frame.Data))
 							} else {
 								continue // キーフレーム前のデルタフレームはスキップ
 							}
+						} else {
+							// フレームIDのギャップを検出
+							expectedID := sm.lastFrameID + 1
+							if frame.ID != expectedID {
+								gap := frame.ID - expectedID
+								if gap > 0 {
+									sm.droppedFrames += gap
+									DebugLog("videoframe: FRAME GAP detected! expected=%d, got=%d, dropped=%d frames (total dropped=%d)\n",
+										expectedID, frame.ID, gap, sm.droppedFrames)
+								}
+							}
+							sm.lastFrameID = frame.ID
+						}
+						sm.frameCount++
+
+						// 定期的に統計を出力（100フレームごと）
+						if sm.frameCount%100 == 0 {
+							dropRate := float64(sm.droppedFrames) / float64(sm.frameCount+sm.droppedFrames) * 100
+							DebugLog("videoframe: Stats - received=%d, dropped=%d, drop_rate=%.2f%%\n",
+								sm.frameCount, sm.droppedFrames, dropRate)
 						}
 
 						if err := sm.writer.WriteVideoFrame(frame.Data, frame.Timestamp, keyframe); err != nil {
