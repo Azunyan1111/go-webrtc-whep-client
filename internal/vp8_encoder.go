@@ -2,6 +2,7 @@ package internal
 
 import (
 	"fmt"
+	"runtime"
 	"unsafe"
 
 	"github.com/Azunyan1111/libvpx-go/vpx"
@@ -44,10 +45,17 @@ func NewVP8Encoder(width, height int, pixelFormat string) (*VP8Encoder, error) {
 	cfg.RcEndUsage = vpx.Cbr
 	cfg.KfMode = vpx.KfAuto
 	cfg.KfMaxDist = 30
-	cfg.GThreads = 4
+	// スレッド数をCPUコア数に合わせる（最低4）
+	numThreads := runtime.NumCPU()
+	if numThreads < 4 {
+		numThreads = 4
+	}
+	cfg.GThreads = uint32(numThreads)
 	cfg.GLagInFrames = 0
 	cfg.RcMinQuantizer = 4
 	cfg.RcMaxQuantizer = 48
+	// リアルタイムエンコード用のプロファイル設定
+	cfg.GProfile = 0 // Simple profile for faster encoding
 
 	if err := vpx.Error(vpx.CodecEncInitVer(ctx, iface, cfg, 0, vpx.EncoderABIVersion)); err != nil {
 		vpx.CodecDestroy(ctx)
@@ -61,8 +69,8 @@ func NewVP8Encoder(width, height int, pixelFormat string) (*VP8Encoder, error) {
 	}
 	img.Deref()
 
-	DebugLog("VP8Encoder: requested %dx%d, image W=%d H=%d DW=%d DH=%d, pixelFormat=%s\n",
-		width, height, img.W, img.H, img.DW, img.DH, pixelFormat)
+	DebugLog("VP8Encoder: requested %dx%d, image W=%d H=%d DW=%d DH=%d, pixelFormat=%s, threads=%d\n",
+		width, height, img.W, img.H, img.DW, img.DH, pixelFormat, numThreads)
 
 	return &VP8Encoder{
 		ctx:         ctx,
@@ -97,8 +105,8 @@ func (e *VP8Encoder) Encode(frameData []byte) ([]byte, bool, error) {
 		e.rgbaToI420(frameData)
 	}
 
-	// Encode frame
-	if err := vpx.Error(vpx.CodecEncode(e.ctx, e.img, vpx.CodecPts(e.pts), 1, 0, vpx.DlGoodQuality)); err != nil {
+	// Encode frame (DlRealtime for low-latency encoding)
+	if err := vpx.Error(vpx.CodecEncode(e.ctx, e.img, vpx.CodecPts(e.pts), 1, 0, vpx.DlRealtime)); err != nil {
 		detail := vpx.CodecErrorDetail(e.ctx)
 		return nil, false, fmt.Errorf("failed to encode frame: %v (detail: %s)", err, detail)
 	}

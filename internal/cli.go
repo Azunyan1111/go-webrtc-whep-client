@@ -12,11 +12,15 @@ var (
 	WhipURL           string
 	DebugMode         bool
 	NoFrameValidation bool
+	NoPacing          bool
+	DropThreshold     int // 遅延フレーム破棄閾値（ミリ秒）
 )
 
 func init() {
 	pflag.BoolVarP(&DebugMode, "debug", "d", false, "Enable debug logging")
 	pflag.BoolVar(&NoFrameValidation, "no-validate", false, "Disable frame validation (show raw packet loss artifacts)")
+	pflag.BoolVar(&NoPacing, "no-pacing", false, "Disable PTS-based pacing (send frames as fast as possible)")
+	pflag.IntVar(&DropThreshold, "drop-threshold", 200, "Drop frames that are more than this many milliseconds late (0 to disable)")
 }
 
 func SetupUsage() {

@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -14,6 +15,20 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/spf13/pflag"
 )
+
+// 統計情報
+type stats struct {
+	inputVideoFrames   int64 // 入力ビデオフレーム数
+	sentVideoFrames    int64 // 送信ビデオフレーム数
+	droppedVideoFrames int64 // 破棄ビデオフレーム数
+	inputAudioFrames   int64 // 入力オーディオフレーム数
+	sentAudioFrames    int64 // 送信オーディオフレーム数
+	droppedAudioFrames int64 // 破棄オーディオフレーム数
+	sentVideoRTP       int64 // 送信ビデオRTPパケット数
+	sentAudioRTP       int64 // 送信オーディオRTPパケット数
+	encodeErrors       int64 // エンコードエラー数
+	sendErrors         int64 // 送信エラー数
+}
 
 func main() {
 	internal.SetupWhipUsage()
@@ -192,6 +207,23 @@ func run() error {
 	videoPacketizer := internal.NewVP8Packetizer(rand.Uint32())
 	audioPacketizer := internal.NewOpusPacketizer(rand.Uint32())
 
+	// Create pacer for PTS-based timing (shared between video and audio)
+	var pacer *internal.Pacer
+	dropThreshold := time.Duration(internal.DropThreshold) * time.Millisecond
+	if !internal.NoPacing {
+		pacer = internal.NewPacer(1 * time.Second) // max wait 1 second
+		fmt.Fprintln(os.Stderr, "PTS-based pacing enabled")
+		if dropThreshold > 0 {
+			fmt.Fprintf(os.Stderr, "Late frame dropping enabled (threshold: %v)\n", dropThreshold)
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "PTS-based pacing disabled")
+	}
+
+	// 統計情報の初期化
+	var s stats
+	statsStartTime := time.Now()
+
 	// Handle interrupt signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -203,10 +235,94 @@ func run() error {
 		close(stopChan)
 	}()
 
+	// 統計情報を5秒ごとに出力するgoroutine
+	if internal.DebugMode {
+		go func() {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+			var lastInputVideo, lastSentVideo, lastDroppedVideo, lastInputAudio, lastSentAudio, lastDroppedAudio int64
+			var lastSentVideoRTP, lastSentAudioRTP int64
+			lastTime := statsStartTime
+			for {
+				select {
+				case <-stopChan:
+					return
+				case now := <-ticker.C:
+					elapsed := now.Sub(lastTime).Seconds()
+					if elapsed <= 0 {
+						elapsed = 5.0
+					}
+
+					// 現在の値を取得
+					currentInputVideo := atomic.LoadInt64(&s.inputVideoFrames)
+					currentSentVideo := atomic.LoadInt64(&s.sentVideoFrames)
+					currentDroppedVideo := atomic.LoadInt64(&s.droppedVideoFrames)
+					currentInputAudio := atomic.LoadInt64(&s.inputAudioFrames)
+					currentSentAudio := atomic.LoadInt64(&s.sentAudioFrames)
+					currentDroppedAudio := atomic.LoadInt64(&s.droppedAudioFrames)
+					currentSentVideoRTP := atomic.LoadInt64(&s.sentVideoRTP)
+					currentSentAudioRTP := atomic.LoadInt64(&s.sentAudioRTP)
+					encodeErrors := atomic.LoadInt64(&s.encodeErrors)
+					sendErrors := atomic.LoadInt64(&s.sendErrors)
+
+					// 差分を計算
+					diffInputVideo := currentInputVideo - lastInputVideo
+					diffSentVideo := currentSentVideo - lastSentVideo
+					diffDroppedVideo := currentDroppedVideo - lastDroppedVideo
+					diffInputAudio := currentInputAudio - lastInputAudio
+					diffSentAudio := currentSentAudio - lastSentAudio
+					diffDroppedAudio := currentDroppedAudio - lastDroppedAudio
+					diffSentVideoRTP := currentSentVideoRTP - lastSentVideoRTP
+					diffSentAudioRTP := currentSentAudioRTP - lastSentAudioRTP
+
+					// FPS計算
+					inputVideoFPS := float64(diffInputVideo) / elapsed
+					sentVideoFPS := float64(diffSentVideo) / elapsed
+					inputAudioFPS := float64(diffInputAudio) / elapsed
+					sentAudioFPS := float64(diffSentAudio) / elapsed
+
+					// 全体経過時間
+					totalElapsed := now.Sub(statsStartTime).Seconds()
+
+					fmt.Fprintf(os.Stderr, "\n[STATS] ---- %.1fs elapsed ----\n", totalElapsed)
+					fmt.Fprintf(os.Stderr, "[STATS] Video: input=%d (%.1f fps), sent=%d (%.1f fps), dropped=%d, RTP packets=%d\n",
+						currentInputVideo, inputVideoFPS, currentSentVideo, sentVideoFPS, diffDroppedVideo, diffSentVideoRTP)
+					fmt.Fprintf(os.Stderr, "[STATS] Audio: input=%d (%.1f fps), sent=%d (%.1f fps), dropped=%d, RTP packets=%d\n",
+						currentInputAudio, inputAudioFPS, currentSentAudio, sentAudioFPS, diffDroppedAudio, diffSentAudioRTP)
+					if encodeErrors > 0 || sendErrors > 0 {
+						fmt.Fprintf(os.Stderr, "[STATS] Errors: encode=%d, send=%d\n", encodeErrors, sendErrors)
+					}
+
+					// 最後の値を更新
+					lastInputVideo = currentInputVideo
+					lastSentVideo = currentSentVideo
+					lastDroppedVideo = currentDroppedVideo
+					lastInputAudio = currentInputAudio
+					lastSentAudio = currentSentAudio
+					lastDroppedAudio = currentDroppedAudio
+					lastSentVideoRTP = currentSentVideoRTP
+					lastSentAudioRTP = currentSentAudioRTP
+					lastTime = now
+				}
+			}
+		}()
+	}
+
 	// Process first frame
 	if firstFrame.Type == internal.FrameTypeVideo {
-		if err := processVideoFrame(firstFrame, encoder, videoPacketizer, videoTrack); err != nil {
+		atomic.AddInt64(&s.inputVideoFrames, 1)
+		// Apply pacing before sending
+		if pacer != nil {
+			pacer.Wait(firstFrame.TimestampMs)
+		}
+		// 最初のフレームは破棄チェックなし（基準時刻設定後なので必ず通る）
+		sentRTP, err := processVideoFrameWithStats(firstFrame, encoder, videoPacketizer, videoTrack)
+		if err != nil {
 			internal.DebugLog("Error processing video frame: %v\n", err)
+			atomic.AddInt64(&s.encodeErrors, 1)
+		} else {
+			atomic.AddInt64(&s.sentVideoFrames, 1)
+			atomic.AddInt64(&s.sentVideoRTP, int64(sentRTP))
 		}
 	}
 
@@ -233,21 +349,43 @@ func run() error {
 
 		switch frame.Type {
 		case internal.FrameTypeVideo:
-			if err := processVideoFrame(frame, encoder, videoPacketizer, videoTrack); err != nil {
-				internal.DebugLog("Error processing video frame: %v\n", err)
+			atomic.AddInt64(&s.inputVideoFrames, 1)
+			// Check if frame should be dropped due to lateness
+			if pacer != nil && pacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
+				atomic.AddInt64(&s.droppedVideoFrames, 1)
 				continue
 			}
-			videoCount++
-			if videoCount%100 == 0 {
-				internal.DebugLog("Sent %d video frames\n", videoCount)
+			// Apply pacing before sending
+			if pacer != nil {
+				pacer.Wait(frame.TimestampMs)
 			}
+			sentRTP, err := processVideoFrameWithStats(frame, encoder, videoPacketizer, videoTrack)
+			if err != nil {
+				internal.DebugLog("Error processing video frame: %v\n", err)
+				atomic.AddInt64(&s.encodeErrors, 1)
+				continue
+			}
+			atomic.AddInt64(&s.sentVideoFrames, 1)
+			atomic.AddInt64(&s.sentVideoRTP, int64(sentRTP))
+			videoCount++
 
 		case internal.FrameTypeAudio:
+			atomic.AddInt64(&s.inputAudioFrames, 1)
+			// Check if frame should be dropped due to lateness
+			if pacer != nil && pacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
+				atomic.AddInt64(&s.droppedAudioFrames, 1)
+				continue
+			}
+			// Apply pacing before sending
+			if pacer != nil {
+				pacer.Wait(frame.TimestampMs)
+			}
 			if needsOpusEncode && opusEncoder != nil {
 				// PCM -> Opus encoding
 				encodedFrames, err := opusEncoder.Encode(frame.Data, frame.TimestampMs)
 				if err != nil {
 					internal.DebugLog("Error encoding audio: %v\n", err)
+					atomic.AddInt64(&s.encodeErrors, 1)
 					continue
 				}
 				for _, encoded := range encodedFrames {
@@ -256,40 +394,50 @@ func run() error {
 					if packet != nil {
 						if err := audioTrack.WriteRTP(packet); err != nil {
 							internal.DebugLog("Error writing audio RTP: %v\n", err)
+							atomic.AddInt64(&s.sendErrors, 1)
+						} else {
+							atomic.AddInt64(&s.sentAudioRTP, 1)
 						}
 					}
 				}
+				atomic.AddInt64(&s.sentAudioFrames, 1)
 			} else {
 				// Already Opus, pass through
 				packet := audioPacketizer.Packetize(frame.Data, frame.TimestampMs)
 				if packet != nil {
 					if err := audioTrack.WriteRTP(packet); err != nil {
 						internal.DebugLog("Error writing audio RTP: %v\n", err)
+						atomic.AddInt64(&s.sendErrors, 1)
+					} else {
+						atomic.AddInt64(&s.sentAudioRTP, 1)
 					}
 				}
+				atomic.AddInt64(&s.sentAudioFrames, 1)
 			}
 			audioCount++
 		}
 	}
 }
 
-func processVideoFrame(frame *internal.Frame, encoder *internal.VP8Encoder, packetizer *internal.VP8Packetizer, track *webrtc.TrackLocalStaticRTP) error {
+func processVideoFrameWithStats(frame *internal.Frame, encoder *internal.VP8Encoder, packetizer *internal.VP8Packetizer, track *webrtc.TrackLocalStaticRTP) (int, error) {
 	// Encode RGBA to VP8
 	encoded, isKeyframe, err := encoder.Encode(frame.Data)
 	if err != nil {
-		return fmt.Errorf("encode error: %v", err)
+		return 0, fmt.Errorf("encode error: %v", err)
 	}
 	if encoded == nil {
-		return nil
+		return 0, nil
 	}
 
 	// Packetize and send
 	packets := packetizer.Packetize(encoded, frame.TimestampMs, isKeyframe)
+	sentCount := 0
 	for _, packet := range packets {
 		if err := track.WriteRTP(packet); err != nil {
-			return fmt.Errorf("write RTP error: %v", err)
+			return sentCount, fmt.Errorf("write RTP error: %v", err)
 		}
+		sentCount++
 	}
 
-	return nil
+	return sentCount, nil
 }
