@@ -1,3 +1,0 @@
-[submodule "webrtc"]
-	path = webrtc
-	url = git@github.com:pion/webrtc.git
