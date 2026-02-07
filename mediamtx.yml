@@ -1,0 +1,37 @@
+###############################################
+# MediaMTX - 複数WHIP受付用ローカルサーバー設定
+###############################################
+
+# ログレベル
+logLevel: info
+logDestinations: [stdout]
+
+# API (管理用)
+api: yes
+apiAddress: :9997
+
+# 不要なプロトコルを無効化
+rtsp: no
+rtmp: no
+hls: no
+srt: no
+
+# WebRTC サーバー設定 (WHIP/WHEP)
+webrtc: yes
+webrtcAddress: :8889
+webrtcEncryption: no
+webrtcLocalUDPAddress: :8189
+webrtcIPsFromInterfaces: yes
+webrtcIPsFromInterfacesList: []
+webrtcHandshakeTimeout: 10s
+webrtcTrackGatherTimeout: 2s
+webrtcICEServers2: []
+
+# パス設定
+pathDefaults:
+  source: publisher
+  maxReaders: 0
+
+# 任意のパス名でWHIP送信を受け付ける
+paths:
+  all_others:

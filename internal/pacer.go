@@ -4,6 +4,8 @@ import (
 	"time"
 )
 
+const pacingWaitLogInterval = time.Second
+
 // Pacer はPTSに基づいてフレーム送信タイミングを制御する
 type Pacer struct {
 	baseWallTime time.Time     // 基準実時刻
@@ -50,7 +52,7 @@ func (p *Pacer) Wait(timestampMs int64) {
 			DebugLog("Pacing: clamping wait from %v to %v (PTS jump detected)\n", waitDuration, p.maxWait)
 			waitDuration = p.maxWait
 		}
-		DebugLog("Pacing: waiting %v (PTS: %dms)\n", waitDuration, timestampMs)
+		DebugLogPeriodic("pacer.wait", pacingWaitLogInterval, "Pacing: waiting %v (PTS: %dms)\n", waitDuration, timestampMs)
 		time.Sleep(waitDuration)
 	}
 }

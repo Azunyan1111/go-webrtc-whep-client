@@ -44,11 +44,8 @@ help:
 	@echo "Platform: $(UNAME_S) $(UNAME_M)"
 
 # Build WHEP client (pion/webrtc)
-whep-go:
+build:
 	$(GO) build $(GOFLAGS) -o $(WHEP_GO) ./cmd/whep-go
-
-# Build WHIP client
-whip-go:
 	$(GO) build $(GOFLAGS) -o $(WHIP_GO) ./cmd/whip-go
 
 # Build for Ubuntu/Linux AMD64 using Docker

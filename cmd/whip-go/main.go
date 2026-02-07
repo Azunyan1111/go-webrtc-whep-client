@@ -207,11 +207,14 @@ func run() error {
 	videoPacketizer := internal.NewVP8Packetizer(rand.Uint32())
 	audioPacketizer := internal.NewOpusPacketizer(rand.Uint32())
 
-	// Create pacer for PTS-based timing (shared between video and audio)
-	var pacer *internal.Pacer
+	// Create per-track pacers for PTS-based timing
+	// Video/Audioで別々に管理し、異なる時刻系列の混在を防ぐ
+	var videoPacer *internal.Pacer
+	var audioPacer *internal.Pacer
 	dropThreshold := time.Duration(internal.DropThreshold) * time.Millisecond
 	if !internal.NoPacing {
-		pacer = internal.NewPacer(1 * time.Second) // max wait 1 second
+		videoPacer = internal.NewPacer(1 * time.Second) // max wait 1 second
+		audioPacer = internal.NewPacer(1 * time.Second) // max wait 1 second
 		fmt.Fprintln(os.Stderr, "PTS-based pacing enabled")
 		if dropThreshold > 0 {
 			fmt.Fprintf(os.Stderr, "Late frame dropping enabled (threshold: %v)\n", dropThreshold)
@@ -312,8 +315,8 @@ func run() error {
 	if firstFrame.Type == internal.FrameTypeVideo {
 		atomic.AddInt64(&s.inputVideoFrames, 1)
 		// Apply pacing before sending
-		if pacer != nil {
-			pacer.Wait(firstFrame.TimestampMs)
+		if videoPacer != nil {
+			videoPacer.Wait(firstFrame.TimestampMs)
 		}
 		// 最初のフレームは破棄チェックなし（基準時刻設定後なので必ず通る）
 		sentRTP, err := processVideoFrameWithStats(firstFrame, encoder, videoPacketizer, videoTrack)
@@ -351,13 +354,13 @@ func run() error {
 		case internal.FrameTypeVideo:
 			atomic.AddInt64(&s.inputVideoFrames, 1)
 			// Check if frame should be dropped due to lateness
-			if pacer != nil && pacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
+			if videoPacer != nil && videoPacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
 				atomic.AddInt64(&s.droppedVideoFrames, 1)
 				continue
 			}
 			// Apply pacing before sending
-			if pacer != nil {
-				pacer.Wait(frame.TimestampMs)
+			if videoPacer != nil {
+				videoPacer.Wait(frame.TimestampMs)
 			}
 			sentRTP, err := processVideoFrameWithStats(frame, encoder, videoPacketizer, videoTrack)
 			if err != nil {
@@ -372,13 +375,13 @@ func run() error {
 		case internal.FrameTypeAudio:
 			atomic.AddInt64(&s.inputAudioFrames, 1)
 			// Check if frame should be dropped due to lateness
-			if pacer != nil && pacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
+			if audioPacer != nil && audioPacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
 				atomic.AddInt64(&s.droppedAudioFrames, 1)
 				continue
 			}
 			// Apply pacing before sending
-			if pacer != nil {
-				pacer.Wait(frame.TimestampMs)
+			if audioPacer != nil {
+				audioPacer.Wait(frame.TimestampMs)
 			}
 			if needsOpusEncode && opusEncoder != nil {
 				// PCM -> Opus encoding
