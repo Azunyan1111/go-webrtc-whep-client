@@ -45,10 +45,13 @@ func NewVP8Encoder(width, height int, pixelFormat string) (*VP8Encoder, error) {
 	cfg.RcEndUsage = vpx.Cbr
 	cfg.KfMode = vpx.KfAuto
 	cfg.KfMaxDist = 30
-	// スレッド数をCPUコア数に合わせる（最低4）
+	// スレッド数は上限を設けてCPU過負荷を抑える
 	numThreads := runtime.NumCPU()
-	if numThreads < 4 {
+	if numThreads > 4 {
 		numThreads = 4
+	}
+	if numThreads < 1 {
+		numThreads = 1
 	}
 	cfg.GThreads = uint32(numThreads)
 	cfg.GLagInFrames = 0

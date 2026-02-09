@@ -260,12 +260,12 @@ func (h *mkvHandler) handleSimpleBlock(data []byte) error {
 	}
 
 	frame := &Frame{
-		Type:        frameType,
-		Data:        make([]byte, len(frameData)),
+		Type: frameType,
+		// go-mkvparse 側で要素ごとに新しい []byte が返るため、ここでの追加コピーは不要。
+		Data:        frameData,
 		TimestampMs: timestampMs,
 		IsKeyframe:  isKeyframe,
 	}
-	copy(frame.Data, frameData)
 
 	select {
 	case h.reader.frames <- frame:

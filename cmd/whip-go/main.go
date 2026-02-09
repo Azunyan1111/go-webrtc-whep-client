@@ -6,6 +6,8 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/pprof"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -47,6 +49,38 @@ func main() {
 }
 
 func run() error {
+	if internal.CPUProfilePath != "" {
+		f, err := os.Create(internal.CPUProfilePath)
+		if err != nil {
+			return fmt.Errorf("failed to create cpu profile file: %v", err)
+		}
+		if err := pprof.StartCPUProfile(f); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("failed to start cpu profile: %v", err)
+		}
+		defer func() {
+			pprof.StopCPUProfile()
+			_ = f.Close()
+			fmt.Fprintf(os.Stderr, "CPU profile written: %s\n", internal.CPUProfilePath)
+		}()
+	}
+	if internal.MemProfilePath != "" {
+		defer func() {
+			f, err := os.Create(internal.MemProfilePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to create mem profile file: %v\n", err)
+				return
+			}
+			defer f.Close()
+			runtime.GC()
+			if err := pprof.WriteHeapProfile(f); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to write mem profile: %v\n", err)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "Memory profile written: %s\n", internal.MemProfilePath)
+		}()
+	}
+
 	fmt.Fprintf(os.Stderr, "Connecting to WHIP server: %s\n", internal.WhipURL)
 	fmt.Fprintln(os.Stderr, "Reading MKV from stdin (rawvideo + Opus)")
 

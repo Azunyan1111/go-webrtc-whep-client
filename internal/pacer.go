@@ -25,9 +25,7 @@ func NewPacer(maxWait time.Duration) *Pacer {
 // 入力がリアルタイムより遅い場合は待機なしで即座に返る
 func (p *Pacer) Wait(timestampMs int64) {
 	if !p.initialized {
-		p.baseWallTime = time.Now()
-		p.basePTS = timestampMs
-		p.initialized = true
+		p.resync(timestampMs)
 		return
 	}
 
@@ -35,10 +33,7 @@ func (p *Pacer) Wait(timestampMs int64) {
 	ptsDiff := timestampMs - p.basePTS
 	if ptsDiff < 0 {
 		// PTSが戻った場合（ループ等）はリセット
-		p.Reset()
-		p.baseWallTime = time.Now()
-		p.basePTS = timestampMs
-		p.initialized = true
+		p.resync(timestampMs)
 		return
 	}
 
@@ -88,9 +83,21 @@ func (p *Pacer) ShouldDrop(timestampMs int64, threshold time.Duration) bool {
 
 	// 遅延が閾値を超えていたら破棄
 	if lateness > threshold {
+		// 大幅遅延時は連続ドロップを避けるため基準時刻を再同期する
+		if p.maxWait > 0 && lateness > p.maxWait {
+			DebugLog("Pacing drift detected: PTS=%dms, lateness=%v (maxWait=%v), resyncing\n", timestampMs, lateness, p.maxWait)
+			p.resync(timestampMs)
+			return false
+		}
 		DebugLog("Dropping frame: PTS=%dms, lateness=%v (threshold=%v)\n", timestampMs, lateness, threshold)
 		return true
 	}
 
 	return false
+}
+
+func (p *Pacer) resync(timestampMs int64) {
+	p.baseWallTime = time.Now()
+	p.basePTS = timestampMs
+	p.initialized = true
 }
