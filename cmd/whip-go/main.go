@@ -8,12 +8,14 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/pprof"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/Azunyan1111/go-webrtc-whep-client/internal"
 	"github.com/pion/interceptor"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/spf13/pflag"
 )
@@ -204,7 +206,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if _, err = peerConnection.AddTrack(videoTrack); err != nil {
+	videoSender, err := peerConnection.AddTrack(videoTrack)
+	if err != nil {
 		return err
 	}
 
@@ -216,7 +219,8 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if _, err = peerConnection.AddTrack(audioTrack); err != nil {
+	audioSender, err := peerConnection.AddTrack(audioTrack)
+	if err != nil {
 		return err
 	}
 
@@ -235,6 +239,13 @@ func run() error {
 
 	fmt.Fprintln(os.Stderr, "Connected to WHIP server, sending media...")
 	fmt.Fprintln(os.Stderr, "Press Ctrl+C to stop")
+
+	// Read RTCP reports from senders
+	// RTCP受信時刻を追跡し、5秒間受信がなければ自動終了
+	var lastRTCPReceived int64
+	atomic.StoreInt64(&lastRTCPReceived, time.Now().UnixNano())
+	go readRTCP("video", videoSender, &lastRTCPReceived)
+	go readRTCP("audio", audioSender, &lastRTCPReceived)
 
 	// Create packetizers
 	rand.Seed(time.Now().UnixNano())
@@ -266,10 +277,33 @@ func run() error {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	stopChan := make(chan struct{})
+	var stopOnce sync.Once
+	closeStop := func() {
+		stopOnce.Do(func() { close(stopChan) })
+	}
 	go func() {
 		<-sigChan
 		fmt.Fprintln(os.Stderr, "Stopping...")
-		close(stopChan)
+		closeStop()
+	}()
+
+	// RTCPタイムアウト監視: 5秒間RTCPレポートが来なければ自動終了
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopChan:
+				return
+			case <-ticker.C:
+				last := atomic.LoadInt64(&lastRTCPReceived)
+				if time.Since(time.Unix(0, last)) > 5*time.Second {
+					fmt.Fprintln(os.Stderr, "RTCP timeout: no reports received for 5 seconds, stopping...")
+					closeStop()
+					return
+				}
+			}
+		}
 	}()
 
 	// 統計情報を5秒ごとに出力するgoroutine
@@ -477,4 +511,49 @@ func processVideoFrameWithStats(frame *internal.Frame, encoder *internal.VP8Enco
 	}
 
 	return sentCount, nil
+}
+
+func readRTCP(trackType string, sender *webrtc.RTPSender, lastReceived *int64) {
+	for {
+		packets, _, err := sender.ReadRTCP()
+		if err != nil {
+			return
+		}
+		atomic.StoreInt64(lastReceived, time.Now().UnixNano())
+		if !internal.DebugMode {
+			continue
+		}
+		for _, pkt := range packets {
+			switch p := pkt.(type) {
+			case *rtcp.ReceiverReport:
+				for _, r := range p.Reports {
+					lossPercent := float64(r.FractionLost) / 256.0 * 100.0
+					fmt.Fprintf(os.Stderr, "[RTCP] %s RR: SSRC=%x loss=%.1f%% totalLost=%d jitter=%d lastSeq=%d\n",
+						trackType, r.SSRC, lossPercent, r.TotalLost, r.Jitter, r.LastSequenceNumber)
+				}
+			case *rtcp.SenderReport:
+				fmt.Fprintf(os.Stderr, "[RTCP] %s SR: SSRC=%x packets=%d octets=%d\n",
+					trackType, p.SSRC, p.PacketCount, p.OctetCount)
+				for _, r := range p.Reports {
+					lossPercent := float64(r.FractionLost) / 256.0 * 100.0
+					fmt.Fprintf(os.Stderr, "[RTCP] %s SR-RR: SSRC=%x loss=%.1f%% totalLost=%d jitter=%d\n",
+						trackType, r.SSRC, lossPercent, r.TotalLost, r.Jitter)
+				}
+			case *rtcp.TransportLayerNack:
+				for _, nack := range p.Nacks {
+					fmt.Fprintf(os.Stderr, "[RTCP] %s NACK: seqNums=%v\n", trackType, nack.PacketList())
+				}
+			case *rtcp.PictureLossIndication:
+				fmt.Fprintf(os.Stderr, "[RTCP] %s PLI: senderSSRC=%x mediaSSRC=%x\n",
+					trackType, p.SenderSSRC, p.MediaSSRC)
+			case *rtcp.FullIntraRequest:
+				fmt.Fprintf(os.Stderr, "[RTCP] %s FIR: senderSSRC=%x mediaSSRC=%x\n",
+					trackType, p.SenderSSRC, p.MediaSSRC)
+			case *rtcp.ReceiverEstimatedMaximumBitrate:
+				fmt.Fprintf(os.Stderr, "[RTCP] %s REMB: bitrate=%.0f bps\n", trackType, p.Bitrate)
+			default:
+				fmt.Fprintf(os.Stderr, "[RTCP] %s %T\n", trackType, pkt)
+			}
+		}
+	}
 }
