@@ -32,7 +32,14 @@ type stats struct {
 	sentAudioRTP       int64 // 送信オーディオRTPパケット数
 	encodeErrors       int64 // エンコードエラー数
 	sendErrors         int64 // 送信エラー数
+	queueDroppedFrames int64 // キュー由来の破棄フレーム数
 }
+
+const (
+	frameQueueCapacity         = 12
+	frameQueueLowLatencyTarget = 4
+	frameQueueTrimInterval     = 3
+)
 
 func main() {
 	internal.SetupWhipUsage()
@@ -89,14 +96,23 @@ func run() error {
 	// Create MKV reader
 	mkvReader := internal.NewMKVReader(os.Stdin)
 
+	// 統計情報の初期化
+	var s stats
+
+	// stdin 取り込みを先行し、後段のエンコード/送信と分離する
+	frameQueue := make(chan *internal.Frame, frameQueueCapacity)
+	frameReadErr := make(chan error, 1)
+	go ingestFrames(mkvReader, frameQueue, frameReadErr, &s)
+
 	// Wait for track info
 	fmt.Fprintln(os.Stderr, "Waiting for first video frame to determine resolution...")
 
 	// Read first video frame to get dimensions
 	var firstFrame *internal.Frame
 	for {
-		frame, err := mkvReader.ReadFrame()
-		if err != nil {
+		frame, ok := <-frameQueue
+		if !ok {
+			err := <-frameReadErr
 			if err == io.EOF {
 				return fmt.Errorf("no video frames found in input")
 			}
@@ -268,8 +284,6 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "PTS-based pacing disabled")
 	}
 
-	// 統計情報の初期化
-	var s stats
 	statsStartTime := time.Now()
 
 	// Handle interrupt signal
@@ -313,6 +327,7 @@ func run() error {
 			defer ticker.Stop()
 			var lastInputVideo, lastSentVideo, lastDroppedVideo, lastInputAudio, lastSentAudio, lastDroppedAudio int64
 			var lastSentVideoRTP, lastSentAudioRTP int64
+			var lastQueueDropped int64
 			lastTime := statsStartTime
 			for {
 				select {
@@ -333,8 +348,11 @@ func run() error {
 					currentDroppedAudio := atomic.LoadInt64(&s.droppedAudioFrames)
 					currentSentVideoRTP := atomic.LoadInt64(&s.sentVideoRTP)
 					currentSentAudioRTP := atomic.LoadInt64(&s.sentAudioRTP)
+					currentQueueDropped := atomic.LoadInt64(&s.queueDroppedFrames)
 					encodeErrors := atomic.LoadInt64(&s.encodeErrors)
 					sendErrors := atomic.LoadInt64(&s.sendErrors)
+					queueDepth := len(frameQueue)
+					queueCap := cap(frameQueue)
 
 					// 差分を計算
 					diffInputVideo := currentInputVideo - lastInputVideo
@@ -345,6 +363,7 @@ func run() error {
 					diffDroppedAudio := currentDroppedAudio - lastDroppedAudio
 					diffSentVideoRTP := currentSentVideoRTP - lastSentVideoRTP
 					diffSentAudioRTP := currentSentAudioRTP - lastSentAudioRTP
+					diffQueueDropped := currentQueueDropped - lastQueueDropped
 
 					// FPS計算
 					inputVideoFPS := float64(diffInputVideo) / elapsed
@@ -360,6 +379,8 @@ func run() error {
 						currentInputVideo, inputVideoFPS, currentSentVideo, sentVideoFPS, diffDroppedVideo, diffSentVideoRTP)
 					fmt.Fprintf(os.Stderr, "[STATS] Audio: input=%d (%.1f fps), sent=%d (%.1f fps), dropped=%d, RTP packets=%d\n",
 						currentInputAudio, inputAudioFPS, currentSentAudio, sentAudioFPS, diffDroppedAudio, diffSentAudioRTP)
+					fmt.Fprintf(os.Stderr, "[STATS] Queue: depth=%d/%d, dropped(total=%d, +%d)\n",
+						queueDepth, queueCap, currentQueueDropped, diffQueueDropped)
 					if encodeErrors > 0 || sendErrors > 0 {
 						fmt.Fprintf(os.Stderr, "[STATS] Errors: encode=%d, send=%d\n", encodeErrors, sendErrors)
 					}
@@ -373,6 +394,7 @@ func run() error {
 					lastDroppedAudio = currentDroppedAudio
 					lastSentVideoRTP = currentSentVideoRTP
 					lastSentAudioRTP = currentSentAudioRTP
+					lastQueueDropped = currentQueueDropped
 					lastTime = now
 				}
 			}
@@ -381,7 +403,6 @@ func run() error {
 
 	// Process first frame
 	if firstFrame.Type == internal.FrameTypeVideo {
-		atomic.AddInt64(&s.inputVideoFrames, 1)
 		// Apply pacing before sending
 		if videoPacer != nil {
 			videoPacer.Wait(firstFrame.TimestampMs)
@@ -400,68 +421,90 @@ func run() error {
 	// Main loop
 	videoCount := 1
 	audioCount := 0
+	lastQueueDropSeen := atomic.LoadInt64(&s.queueDroppedFrames)
 	for {
 		select {
 		case <-stopChan:
 			fmt.Fprintf(os.Stderr, "Sent %d video frames, %d audio frames\n", videoCount, audioCount)
 			return nil
-		default:
-		}
+		case frame, ok := <-frameQueue:
+			if !ok {
+				err := <-frameReadErr
+				if err == io.EOF {
+					fmt.Fprintf(os.Stderr, "End of input stream\n")
+					fmt.Fprintf(os.Stderr, "Sent %d video frames, %d audio frames\n", videoCount, audioCount)
+					return nil
+				}
+				return fmt.Errorf("failed to read frame: %v", err)
+			}
 
-		frame, err := mkvReader.ReadFrame()
-		if err != nil {
-			if err == io.EOF {
-				fmt.Fprintf(os.Stderr, "End of input stream\n")
-				fmt.Fprintf(os.Stderr, "Sent %d video frames, %d audio frames\n", videoCount, audioCount)
-				return nil
+			currentQueueDropSeen := atomic.LoadInt64(&s.queueDroppedFrames)
+			if currentQueueDropSeen != lastQueueDropSeen {
+				if videoPacer != nil {
+					videoPacer.Reset()
+				}
+				if audioPacer != nil {
+					audioPacer.Reset()
+				}
+				internal.DebugLogPeriodic("pacer.queue_resync", time.Second, "Pacing resync after queue drops: total=%d\n", currentQueueDropSeen)
+				lastQueueDropSeen = currentQueueDropSeen
 			}
-			return fmt.Errorf("failed to read frame: %v", err)
-		}
 
-		switch frame.Type {
-		case internal.FrameTypeVideo:
-			atomic.AddInt64(&s.inputVideoFrames, 1)
-			// Check if frame should be dropped due to lateness
-			if videoPacer != nil && videoPacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
-				atomic.AddInt64(&s.droppedVideoFrames, 1)
-				continue
-			}
-			// Apply pacing before sending
-			if videoPacer != nil {
-				videoPacer.Wait(frame.TimestampMs)
-			}
-			sentRTP, err := processVideoFrameWithStats(frame, encoder, videoPacketizer, videoTrack)
-			if err != nil {
-				internal.DebugLog("Error processing video frame: %v\n", err)
-				atomic.AddInt64(&s.encodeErrors, 1)
-				continue
-			}
-			atomic.AddInt64(&s.sentVideoFrames, 1)
-			atomic.AddInt64(&s.sentVideoRTP, int64(sentRTP))
-			videoCount++
-
-		case internal.FrameTypeAudio:
-			atomic.AddInt64(&s.inputAudioFrames, 1)
-			// Check if frame should be dropped due to lateness
-			if audioPacer != nil && audioPacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
-				atomic.AddInt64(&s.droppedAudioFrames, 1)
-				continue
-			}
-			// Apply pacing before sending
-			if audioPacer != nil {
-				audioPacer.Wait(frame.TimestampMs)
-			}
-			if needsOpusEncode && opusEncoder != nil {
-				// PCM -> Opus encoding
-				encodedFrames, err := opusEncoder.Encode(frame.Data, frame.TimestampMs)
+			switch frame.Type {
+			case internal.FrameTypeVideo:
+				// Check if frame should be dropped due to lateness
+				if videoPacer != nil && videoPacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
+					atomic.AddInt64(&s.droppedVideoFrames, 1)
+					continue
+				}
+				// Apply pacing before sending
+				if videoPacer != nil {
+					videoPacer.Wait(frame.TimestampMs)
+				}
+				sentRTP, err := processVideoFrameWithStats(frame, encoder, videoPacketizer, videoTrack)
 				if err != nil {
-					internal.DebugLog("Error encoding audio: %v\n", err)
+					internal.DebugLog("Error processing video frame: %v\n", err)
 					atomic.AddInt64(&s.encodeErrors, 1)
 					continue
 				}
-				for _, encoded := range encodedFrames {
-					// Use the timestamp from each encoded frame (increments by 10ms per frame)
-					packet := audioPacketizer.Packetize(encoded.Data, encoded.TimestampMs)
+				atomic.AddInt64(&s.sentVideoFrames, 1)
+				atomic.AddInt64(&s.sentVideoRTP, int64(sentRTP))
+				videoCount++
+
+			case internal.FrameTypeAudio:
+				// Check if frame should be dropped due to lateness
+				if audioPacer != nil && audioPacer.ShouldDrop(frame.TimestampMs, dropThreshold) {
+					atomic.AddInt64(&s.droppedAudioFrames, 1)
+					continue
+				}
+				// Apply pacing before sending
+				if audioPacer != nil {
+					audioPacer.Wait(frame.TimestampMs)
+				}
+				if needsOpusEncode && opusEncoder != nil {
+					// PCM -> Opus encoding
+					encodedFrames, err := opusEncoder.Encode(frame.Data, frame.TimestampMs)
+					if err != nil {
+						internal.DebugLog("Error encoding audio: %v\n", err)
+						atomic.AddInt64(&s.encodeErrors, 1)
+						continue
+					}
+					for _, encoded := range encodedFrames {
+						// Use the timestamp from each encoded frame (increments by 10ms per frame)
+						packet := audioPacketizer.Packetize(encoded.Data, encoded.TimestampMs)
+						if packet != nil {
+							if err := audioTrack.WriteRTP(packet); err != nil {
+								internal.DebugLog("Error writing audio RTP: %v\n", err)
+								atomic.AddInt64(&s.sendErrors, 1)
+							} else {
+								atomic.AddInt64(&s.sentAudioRTP, 1)
+							}
+						}
+					}
+					atomic.AddInt64(&s.sentAudioFrames, 1)
+				} else {
+					// Already Opus, pass through
+					packet := audioPacketizer.Packetize(frame.Data, frame.TimestampMs)
 					if packet != nil {
 						if err := audioTrack.WriteRTP(packet); err != nil {
 							internal.DebugLog("Error writing audio RTP: %v\n", err)
@@ -470,23 +513,100 @@ func run() error {
 							atomic.AddInt64(&s.sentAudioRTP, 1)
 						}
 					}
+					atomic.AddInt64(&s.sentAudioFrames, 1)
 				}
-				atomic.AddInt64(&s.sentAudioFrames, 1)
-			} else {
-				// Already Opus, pass through
-				packet := audioPacketizer.Packetize(frame.Data, frame.TimestampMs)
-				if packet != nil {
-					if err := audioTrack.WriteRTP(packet); err != nil {
-						internal.DebugLog("Error writing audio RTP: %v\n", err)
-						atomic.AddInt64(&s.sendErrors, 1)
-					} else {
-						atomic.AddInt64(&s.sentAudioRTP, 1)
-					}
-				}
-				atomic.AddInt64(&s.sentAudioFrames, 1)
+				audioCount++
 			}
-			audioCount++
 		}
+	}
+}
+
+func ingestFrames(mkvReader *internal.MKVReader, frameQueue chan *internal.Frame, frameReadErr chan<- error, s *stats) {
+	defer close(frameQueue)
+	trimCounter := 0
+
+	for {
+		frame, err := mkvReader.ReadFrame()
+		if err != nil {
+			frameReadErr <- err
+			return
+		}
+
+		addInputFrameStats(s, frame)
+		enqueueFrame(frameQueue, frame, s, &trimCounter)
+	}
+}
+
+func enqueueFrame(frameQueue chan *internal.Frame, frame *internal.Frame, s *stats, trimCounter *int) {
+	for {
+		select {
+		case frameQueue <- frame:
+			break
+		default:
+			dropped := dropOldestFrame(frameQueue)
+			if dropped != nil {
+				recordQueueDrop(s, dropped, "queue-full", len(frameQueue), cap(frameQueue))
+			}
+			continue
+		}
+		break
+	}
+
+	// 入出力FPSが同程度で滞留する場合、目標超過時に段階的に先頭を捨てて低遅延へ近づける
+	if len(frameQueue) > frameQueueLowLatencyTarget {
+		*trimCounter++
+		if *trimCounter >= frameQueueTrimInterval {
+			dropped := dropOldestFrame(frameQueue)
+			if dropped != nil {
+				recordQueueDrop(s, dropped, "latency-trim", len(frameQueue), cap(frameQueue))
+			}
+			*trimCounter = 0
+		}
+		return
+	}
+
+	*trimCounter = 0
+}
+
+func dropOldestFrame(frameQueue chan *internal.Frame) *internal.Frame {
+	select {
+	case frame := <-frameQueue:
+		return frame
+	default:
+		return nil
+	}
+}
+
+func addInputFrameStats(s *stats, frame *internal.Frame) {
+	switch frame.Type {
+	case internal.FrameTypeVideo:
+		atomic.AddInt64(&s.inputVideoFrames, 1)
+	case internal.FrameTypeAudio:
+		atomic.AddInt64(&s.inputAudioFrames, 1)
+	}
+}
+
+func recordQueueDrop(s *stats, frame *internal.Frame, reason string, queueDepth int, queueCap int) {
+	atomic.AddInt64(&s.queueDroppedFrames, 1)
+	switch frame.Type {
+	case internal.FrameTypeVideo:
+		atomic.AddInt64(&s.droppedVideoFrames, 1)
+	case internal.FrameTypeAudio:
+		atomic.AddInt64(&s.droppedAudioFrames, 1)
+	}
+
+	internal.DebugLog("[QUEUE] dropped oldest frame reason=%s type=%s depth=%d/%d ts=%dms\n",
+		reason, frameTypeString(frame.Type), queueDepth, queueCap, frame.TimestampMs)
+}
+
+func frameTypeString(frameType internal.FrameType) string {
+	switch frameType {
+	case internal.FrameTypeVideo:
+		return "video"
+	case internal.FrameTypeAudio:
+		return "audio"
+	default:
+		return "unknown"
 	}
 }
 
