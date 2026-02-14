@@ -81,6 +81,62 @@ func (p *VP8Packetizer) Packetize(frame []byte, timestampMs int64, isKeyframe bo
 	return packets
 }
 
+func (p *VP8Packetizer) PacketizeAndWrite(frame []byte, timestampMs int64, _ bool, writePacket func(*rtp.Packet) error) (int, error) {
+	if len(frame) == 0 {
+		return 0, nil
+	}
+
+	// Convert timestamp from ms to RTP timestamp (90kHz clock)
+	timestamp := uint32(timestampMs * int64(p.clockRate) / 1000)
+
+	remaining := frame
+	isFirst := true
+	sentCount := 0
+
+	for len(remaining) > 0 {
+		payloadSize := len(remaining)
+		if payloadSize > MaxRTPPayload-1 { // -1 for VP8 payload descriptor
+			payloadSize = MaxRTPPayload - 1
+		}
+
+		// VP8 Payload Descriptor (minimal, 1 byte)
+		var descriptor byte = 0
+		if isFirst {
+			descriptor |= 0x10 // S (start of partition)
+		}
+
+		payload := make([]byte, 1+payloadSize)
+		payload[0] = descriptor
+		copy(payload[1:], remaining[:payloadSize])
+
+		isLast := len(remaining) <= payloadSize
+		packet := &rtp.Packet{
+			Header: rtp.Header{
+				Version:        2,
+				Padding:        false,
+				Extension:      false,
+				Marker:         isLast,
+				PayloadType:    VP8PayloadType,
+				SequenceNumber: p.sequenceNumber,
+				Timestamp:      timestamp,
+				SSRC:           p.ssrc,
+			},
+			Payload: payload,
+		}
+
+		if err := writePacket(packet); err != nil {
+			return sentCount, err
+		}
+
+		sentCount++
+		p.sequenceNumber++
+		remaining = remaining[payloadSize:]
+		isFirst = false
+	}
+
+	return sentCount, nil
+}
+
 type OpusPacketizer struct {
 	sequenceNumber uint16
 	ssrc           uint32

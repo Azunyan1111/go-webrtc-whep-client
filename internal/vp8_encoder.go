@@ -17,6 +17,34 @@ type VP8Encoder struct {
 	pixelFormat string
 }
 
+var (
+	yRTable [256]int
+	yGTable [256]int
+	yBTable [256]int
+	uRTable [256]int
+	uGTable [256]int
+	uBTable [256]int
+	vRTable [256]int
+	vGTable [256]int
+	vBTable [256]int
+)
+
+func init() {
+	for i := 0; i < 256; i++ {
+		yRTable[i] = 66 * i
+		yGTable[i] = 129 * i
+		yBTable[i] = 25 * i
+
+		uRTable[i] = -38 * i
+		uGTable[i] = -74 * i
+		uBTable[i] = 112 * i
+
+		vRTable[i] = 112 * i
+		vGTable[i] = -94 * i
+		vBTable[i] = -18 * i
+	}
+}
+
 func NewVP8Encoder(width, height int, pixelFormat string) (*VP8Encoder, error) {
 	ctx := vpx.NewCodecCtx()
 	if ctx == nil {
@@ -146,47 +174,72 @@ func (e *VP8Encoder) rgbaToI420(rgba []byte) {
 	uPlane := (*(*[1 << 30]byte)(unsafe.Pointer(e.img.Planes[vpx.PlaneU])))[:uStride*h/2]
 	vPlane := (*(*[1 << 30]byte)(unsafe.Pointer(e.img.Planes[vpx.PlaneV])))[:vStride*h/2]
 
-	// Convert RGBA to YUV420
-	for row := 0; row < h; row++ {
-		for col := 0; col < w; col++ {
-			rgbaIdx := (row*w + col) * 4
-			r := int(rgba[rgbaIdx])
-			g := int(rgba[rgbaIdx+1])
-			b := int(rgba[rgbaIdx+2])
+	// Convert RGBA to YUV420 with 2x2 traversal to avoid per-pixel modulo checks.
+	for row := 0; row < h; row += 2 {
+		row0Base := row * w * 4
+		yRow0 := row * yStride
 
-			// RGB to YUV conversion (BT.601)
-			yVal := ((66*r + 129*g + 25*b + 128) >> 8) + 16
-			if yVal > 255 {
-				yVal = 255
-			}
-			if yVal < 0 {
-				yVal = 0
-			}
-			yPlane[row*yStride+col] = byte(yVal)
+		row1 := row + 1
+		hasRow1 := row1 < h
+		row1Base := row1 * w * 4
+		yRow1 := row1 * yStride
 
-			// Subsample for U and V
-			if row%2 == 0 && col%2 == 0 {
-				uvRow := row / 2
-				uvCol := col / 2
-				uVal := ((-38*r - 74*g + 112*b + 128) >> 8) + 128
-				vVal := ((112*r - 94*g - 18*b + 128) >> 8) + 128
-				if uVal > 255 {
-					uVal = 255
-				}
-				if uVal < 0 {
-					uVal = 0
-				}
-				if vVal > 255 {
-					vVal = 255
-				}
-				if vVal < 0 {
-					vVal = 0
-				}
-				uPlane[uvRow*uStride+uvCol] = byte(uVal)
-				vPlane[uvRow*vStride+uvCol] = byte(vVal)
+		uvRow := (row / 2) * uStride
+		vvRow := (row / 2) * vStride
+
+		for col := 0; col < w; col += 2 {
+			idx00 := row0Base + col*4
+			r00 := int(rgba[idx00])
+			g00 := int(rgba[idx00+1])
+			b00 := int(rgba[idx00+2])
+			y00 := ((yRTable[r00] + yGTable[g00] + yBTable[b00] + 128) >> 8) + 16
+			yPlane[yRow0+col] = clampToByte(y00)
+
+			col1 := col + 1
+			if col1 < w {
+				idx01 := idx00 + 4
+				r01 := int(rgba[idx01])
+				g01 := int(rgba[idx01+1])
+				b01 := int(rgba[idx01+2])
+				y01 := ((yRTable[r01] + yGTable[g01] + yBTable[b01] + 128) >> 8) + 16
+				yPlane[yRow0+col1] = clampToByte(y01)
 			}
+
+			if hasRow1 {
+				idx10 := row1Base + col*4
+				r10 := int(rgba[idx10])
+				g10 := int(rgba[idx10+1])
+				b10 := int(rgba[idx10+2])
+				y10 := ((yRTable[r10] + yGTable[g10] + yBTable[b10] + 128) >> 8) + 16
+				yPlane[yRow1+col] = clampToByte(y10)
+
+				if col1 < w {
+					idx11 := idx10 + 4
+					r11 := int(rgba[idx11])
+					g11 := int(rgba[idx11+1])
+					b11 := int(rgba[idx11+2])
+					y11 := ((yRTable[r11] + yGTable[g11] + yBTable[b11] + 128) >> 8) + 16
+					yPlane[yRow1+col1] = clampToByte(y11)
+				}
+			}
+
+			uvCol := col / 2
+			uVal := ((uRTable[r00] + uGTable[g00] + uBTable[b00] + 128) >> 8) + 128
+			vVal := ((vRTable[r00] + vGTable[g00] + vBTable[b00] + 128) >> 8) + 128
+			uPlane[uvRow+uvCol] = clampToByte(uVal)
+			vPlane[vvRow+uvCol] = clampToByte(vVal)
 		}
 	}
+}
+
+func clampToByte(v int) byte {
+	if v < 0 {
+		return 0
+	}
+	if v > 255 {
+		return 255
+	}
+	return byte(v)
 }
 
 func (e *VP8Encoder) yuv420pToI420(yuv []byte) {

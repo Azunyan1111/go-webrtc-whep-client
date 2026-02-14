@@ -620,16 +620,11 @@ func processVideoFrameWithStats(frame *internal.Frame, encoder *internal.VP8Enco
 		return 0, nil
 	}
 
-	// Packetize and send
-	packets := packetizer.Packetize(encoded, frame.TimestampMs, isKeyframe)
-	sentCount := 0
-	for _, packet := range packets {
-		if err := track.WriteRTP(packet); err != nil {
-			return sentCount, fmt.Errorf("write RTP error: %v", err)
-		}
-		sentCount++
+	// Packetize and send without intermediate packet slice allocation.
+	sentCount, err := packetizer.PacketizeAndWrite(encoded, frame.TimestampMs, isKeyframe, track.WriteRTP)
+	if err != nil {
+		return sentCount, fmt.Errorf("write RTP error: %v", err)
 	}
-
 	return sentCount, nil
 }
 
