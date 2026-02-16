@@ -33,12 +33,17 @@ type stats struct {
 	encodeErrors       int64 // エンコードエラー数
 	sendErrors         int64 // 送信エラー数
 	queueDroppedFrames int64 // キュー由来の破棄フレーム数
+	lastVideoPTS       int64 // 送信成功した最後の映像PTS（ms）
+	lastVideoSentAtNs  int64 // 送信成功した最後の映像時刻（UnixNano）
+	lastAudioPTS       int64 // 送信成功した最後の音声PTS（ms）
+	lastAudioSentAtNs  int64 // 送信成功した最後の音声時刻（UnixNano）
 }
 
 const (
 	frameQueueCapacity         = 12
 	frameQueueLowLatencyTarget = 4
 	frameQueueTrimInterval     = 3
+	ptsSyncWindow              = 20 * time.Millisecond
 )
 
 func main() {
@@ -350,6 +355,10 @@ func run() error {
 					currentSentVideoRTP := atomic.LoadInt64(&s.sentVideoRTP)
 					currentSentAudioRTP := atomic.LoadInt64(&s.sentAudioRTP)
 					currentQueueDropped := atomic.LoadInt64(&s.queueDroppedFrames)
+					lastVideoPTS := atomic.LoadInt64(&s.lastVideoPTS)
+					lastVideoSentAtNs := atomic.LoadInt64(&s.lastVideoSentAtNs)
+					lastAudioPTS := atomic.LoadInt64(&s.lastAudioPTS)
+					lastAudioSentAtNs := atomic.LoadInt64(&s.lastAudioSentAtNs)
 					encodeErrors := atomic.LoadInt64(&s.encodeErrors)
 					sendErrors := atomic.LoadInt64(&s.sendErrors)
 					videoQueueDepth := len(videoFrameQueue)
@@ -384,6 +393,18 @@ func run() error {
 						currentInputAudio, inputAudioFPS, currentSentAudio, sentAudioFPS, diffDroppedAudio, diffSentAudioRTP)
 					fmt.Fprintf(os.Stderr, "[STATS] Queue: video=%d/%d, audio=%d/%d, dropped(total=%d, +%d)\n",
 						videoQueueDepth, videoQueueCap, audioQueueDepth, audioQueueCap, currentQueueDropped, diffQueueDropped)
+					fmt.Fprintf(os.Stderr, "[STATS] Last PTS(ms): video=%d, audio=%d\n", lastVideoPTS, lastAudioPTS)
+					if lastVideoSentAtNs > 0 && lastAudioSentAtNs > 0 {
+						sendGap := time.Duration(absInt64(lastVideoSentAtNs - lastAudioSentAtNs))
+						if sendGap <= ptsSyncWindow {
+							fmt.Fprintf(os.Stderr, "[STATS] PTS delta (video-audio, same timing<=%v): %dms (sendGap=%v)\n",
+								ptsSyncWindow, lastVideoPTS-lastAudioPTS, sendGap)
+						} else {
+							fmt.Fprintf(os.Stderr, "[STATS] PTS delta skipped: sendGap=%v (> %v)\n", sendGap, ptsSyncWindow)
+						}
+					} else {
+						fmt.Fprintln(os.Stderr, "[STATS] PTS delta skipped: waiting for both tracks")
+					}
 					if encodeErrors > 0 || sendErrors > 0 {
 						fmt.Fprintf(os.Stderr, "[STATS] Errors: encode=%d, send=%d\n", encodeErrors, sendErrors)
 					}
@@ -418,6 +439,7 @@ func run() error {
 		} else {
 			atomic.AddInt64(&s.sentVideoFrames, 1)
 			atomic.AddInt64(&s.sentVideoRTP, int64(sentRTP))
+			markLastVideoSent(&s, firstFrame.TimestampMs)
 		}
 	}
 
@@ -542,6 +564,7 @@ func processVideoFrames(
 			}
 			atomic.AddInt64(&s.sentVideoFrames, 1)
 			atomic.AddInt64(&s.sentVideoRTP, int64(sentRTP))
+			markLastVideoSent(s, frame.TimestampMs)
 		}
 	}
 }
@@ -592,6 +615,8 @@ func processAudioFrames(
 					atomic.AddInt64(&s.encodeErrors, 1)
 					continue
 				}
+				var lastSentAudioPTS int64
+				audioSent := false
 				for _, encoded := range encodedFrames {
 					packet := audioPacketizer.Packetize(encoded.Data, encoded.TimestampMs)
 					if packet != nil {
@@ -600,8 +625,13 @@ func processAudioFrames(
 							atomic.AddInt64(&s.sendErrors, 1)
 						} else {
 							atomic.AddInt64(&s.sentAudioRTP, 1)
+							lastSentAudioPTS = encoded.TimestampMs
+							audioSent = true
 						}
 					}
+				}
+				if audioSent {
+					markLastAudioSent(s, lastSentAudioPTS)
 				}
 				atomic.AddInt64(&s.sentAudioFrames, 1)
 				continue
@@ -614,6 +644,7 @@ func processAudioFrames(
 					atomic.AddInt64(&s.sendErrors, 1)
 				} else {
 					atomic.AddInt64(&s.sentAudioRTP, 1)
+					markLastAudioSent(s, frame.TimestampMs)
 				}
 			}
 			atomic.AddInt64(&s.sentAudioFrames, 1)
@@ -674,6 +705,25 @@ func addInputFrameStats(s *stats, frame *internal.Frame) {
 	case internal.FrameTypeAudio:
 		atomic.AddInt64(&s.inputAudioFrames, 1)
 	}
+}
+
+func markLastVideoSent(s *stats, ptsMs int64) {
+	nowNs := time.Now().UnixNano()
+	atomic.StoreInt64(&s.lastVideoPTS, ptsMs)
+	atomic.StoreInt64(&s.lastVideoSentAtNs, nowNs)
+}
+
+func markLastAudioSent(s *stats, ptsMs int64) {
+	nowNs := time.Now().UnixNano()
+	atomic.StoreInt64(&s.lastAudioPTS, ptsMs)
+	atomic.StoreInt64(&s.lastAudioSentAtNs, nowNs)
+}
+
+func absInt64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 func recordQueueDrop(s *stats, frame *internal.Frame, reason string, queueDepth int, queueCap int) {
