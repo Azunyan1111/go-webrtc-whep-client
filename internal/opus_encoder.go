@@ -13,14 +13,16 @@ type EncodedAudioFrame struct {
 }
 
 type OpusEncoder struct {
-	enc               *opus.OpusEncoder
-	sampleRate        int
-	channels          int
-	frameSize         int // samples per channel per frame (10ms = sampleRate * 10 / 1000)
-	pcmBuffer         []byte
-	encodedFrameCount int64 // total number of encoded frames (for timestamp calculation)
-	baseTimestampMs   int64 // base timestamp from first input
-	initialized       bool  // whether base timestamp has been set
+	enc                 *opus.OpusEncoder
+	sampleRate          int
+	channels            int
+	frameSize           int // samples per channel per frame (10ms = sampleRate * 10 / 1000)
+	pcmBuffer           []byte
+	bufferStartTSMs     int64 // timestamp of the first sample in pcmBuffer
+	hasBufferStartTS    bool
+	lastClusterTimeMs   int64
+	hasLastClusterTime  bool
+	encodedFrameCounter int64
 }
 
 func NewOpusEncoder(sampleRate, channels int) (*OpusEncoder, error) {
@@ -47,26 +49,45 @@ func NewOpusEncoder(sampleRate, channels int) (*OpusEncoder, error) {
 		sampleRate, channels, frameSize)
 
 	return &OpusEncoder{
-		enc:               enc,
-		sampleRate:        sampleRate,
-		channels:          channels,
-		frameSize:         frameSize,
-		pcmBuffer:         make([]byte, 0),
-		encodedFrameCount: 0,
-		baseTimestampMs:   0,
-		initialized:       false,
+		enc:                 enc,
+		sampleRate:          sampleRate,
+		channels:            channels,
+		frameSize:           frameSize,
+		pcmBuffer:           make([]byte, 0),
+		bufferStartTSMs:     0,
+		hasBufferStartTS:    false,
+		lastClusterTimeMs:   0,
+		hasLastClusterTime:  false,
+		encodedFrameCounter: 0,
 	}, nil
 }
 
-// Encode encodes PCM data to Opus frames with proper timestamps.
-// Each output frame is 10ms, and timestamps are calculated based on
-// the number of frames encoded since initialization.
-func (e *OpusEncoder) Encode(pcm []byte, inputTimestampMs int64) ([]EncodedAudioFrame, error) {
-	// Initialize base timestamp on first call
-	if !e.initialized {
-		e.baseTimestampMs = inputTimestampMs
-		e.initialized = true
-		DebugLog("Opus encoder base timestamp initialized: %dms\n", e.baseTimestampMs)
+// Encode encodes PCM data to Opus frames with timestamps derived from MKV timing.
+// クラスター時刻をアンカーとして、10msごとのOpusフレームにPTSを割り当てる。
+func (e *OpusEncoder) Encode(pcm []byte, inputTimestampMs int64, clusterTimeMs int64) ([]EncodedAudioFrame, error) {
+	if !e.hasBufferStartTS {
+		e.bufferStartTSMs = inputTimestampMs
+		e.hasBufferStartTS = true
+		DebugLog("Opus encoder timestamp anchor initialized: input=%dms cluster=%dms\n", inputTimestampMs, clusterTimeMs)
+	}
+
+	if !e.hasLastClusterTime || clusterTimeMs != e.lastClusterTimeMs {
+		// クラスター境界でアンカーを更新する。
+		// 既にバッファがある場合は残サンプル分を逆算して先頭サンプル時刻を維持する。
+		if len(e.pcmBuffer) == 0 {
+			e.bufferStartTSMs = inputTimestampMs
+		} else {
+			bufferedSamples := int64(len(e.pcmBuffer) / (e.channels * 2))
+			bufferedDurationMs := bufferedSamples * 1000 / int64(e.sampleRate)
+			e.bufferStartTSMs = inputTimestampMs - bufferedDurationMs
+		}
+		e.lastClusterTimeMs = clusterTimeMs
+		e.hasLastClusterTime = true
+		DebugLog("Opus encoder cluster anchor updated: cluster=%dms input=%dms buffer_start=%dms\n",
+			clusterTimeMs, inputTimestampMs, e.bufferStartTSMs)
+	} else if len(e.pcmBuffer) == 0 {
+		// バッファが空の場合は入力PTSをそのまま次のアンカーにする。
+		e.bufferStartTSMs = inputTimestampMs
 	}
 
 	e.pcmBuffer = append(e.pcmBuffer, pcm...)
@@ -84,23 +105,24 @@ func (e *OpusEncoder) Encode(pcm []byte, inputTimestampMs int64) ([]EncodedAudio
 		n, err := e.enc.Encode(frameData, outBuf)
 		if err != nil {
 			DebugLog("Opus encode error: %v\n", err)
-			// Even on error, increment frame count to maintain timing
-			e.encodedFrameCount++
+			// エンコード失敗時もサンプル消費分だけ時刻を進める。
+			e.bufferStartTSMs += int64(e.frameSize * 1000 / e.sampleRate)
+			e.encodedFrameCounter++
 			continue
 		}
 		if n > 0 {
-			// Calculate timestamp: base + (frame_count * 10ms)
-			frameTimestampMs := e.baseTimestampMs + (e.encodedFrameCount * 10)
+			frameTimestampMs := e.bufferStartTSMs
 			encodedFrames = append(encodedFrames, EncodedAudioFrame{
 				Data:        outBuf[:n],
 				TimestampMs: frameTimestampMs,
 			})
 			// Log once per second (100 frames * 10ms = 1000ms)
-			if e.encodedFrameCount%100 == 0 {
-				DebugLog("Opus frame encoded: timestamp=%dms, size=%d bytes, total frames=%d\n", frameTimestampMs, n, e.encodedFrameCount)
+			if e.encodedFrameCounter%100 == 0 {
+				DebugLog("Opus frame encoded: timestamp=%dms, size=%d bytes, total frames=%d\n", frameTimestampMs, n, e.encodedFrameCounter)
 			}
 		}
-		e.encodedFrameCount++
+		e.bufferStartTSMs += int64(e.frameSize * 1000 / e.sampleRate)
+		e.encodedFrameCounter++
 	}
 
 	return encodedFrames, nil

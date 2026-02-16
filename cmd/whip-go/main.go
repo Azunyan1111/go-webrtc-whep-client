@@ -609,7 +609,7 @@ func processAudioFrames(
 			}
 
 			if needsOpusEncode && opusEncoder != nil {
-				encodedFrames, err := opusEncoder.Encode(frame.Data, frame.TimestampMs)
+				encodedFrames, err := opusEncoder.Encode(frame.Data, frame.TimestampMs, frame.ClusterTimeMs)
 				if err != nil {
 					internal.DebugLog("Error encoding audio: %v\n", err)
 					atomic.AddInt64(&s.encodeErrors, 1)

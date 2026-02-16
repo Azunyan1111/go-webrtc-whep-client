@@ -18,10 +18,12 @@ const (
 )
 
 type Frame struct {
-	Type        FrameType
-	Data        []byte
-	TimestampMs int64
-	IsKeyframe  bool
+	Type              FrameType
+	Data              []byte
+	TimestampMs       int64
+	IsKeyframe        bool
+	ClusterTimeMs     int64
+	BlockRelativeTsMs int64
 }
 
 type MKVReader struct {
@@ -305,11 +307,13 @@ func (p *mkvStreamParser) handleElementData(id uint64, size int64) error {
 		return nil
 
 	case ebmlIDTimecode:
-		value, err := p.readSignedInt(size)
+		// Cluster Timecode is an unsigned integer in Matroska.
+		// Signedとして読むと 32767ms 超で負値化し、PTSが巻き戻る。
+		value, err := p.readUnsignedInt(size)
 		if err != nil {
 			return err
 		}
-		p.currentClusterTime = value
+		p.currentClusterTime = int64(value)
 		return nil
 
 	case ebmlIDTimecodeScale:
@@ -395,10 +399,12 @@ func (p *mkvStreamParser) handleSimpleBlock(data []byte) error {
 	}
 
 	frame := &Frame{
-		Type:        frameType,
-		Data:        frameData,
-		TimestampMs: timestampMs,
-		IsKeyframe:  isKeyframe,
+		Type:              frameType,
+		Data:              frameData,
+		TimestampMs:       timestampMs,
+		IsKeyframe:        isKeyframe,
+		ClusterTimeMs:     p.currentClusterTime,
+		BlockRelativeTsMs: int64(relativeTs),
 	}
 	return p.sendFrame(frame)
 }
