@@ -164,7 +164,7 @@ func run() error {
 	}
 
 	// Create VP8 encoder
-	encoder, err := internal.NewVP8Encoder(width, height, pixelFormat)
+	encoder, err := internal.NewVP8Encoder(width, height, pixelFormat, internal.VideoBitrateKbps)
 	if err != nil {
 		return fmt.Errorf("failed to create VP8 encoder: %v", err)
 	}

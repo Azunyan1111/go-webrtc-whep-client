@@ -45,7 +45,11 @@ func init() {
 	}
 }
 
-func NewVP8Encoder(width, height int, pixelFormat string) (*VP8Encoder, error) {
+func NewVP8Encoder(width, height int, pixelFormat string, targetBitrateKbps int) (*VP8Encoder, error) {
+	if targetBitrateKbps <= 0 {
+		return nil, fmt.Errorf("invalid video bitrate: %d (must be > 0)", targetBitrateKbps)
+	}
+
 	ctx := vpx.NewCodecCtx()
 	if ctx == nil {
 		return nil, fmt.Errorf("failed to create codec context")
@@ -68,7 +72,7 @@ func NewVP8Encoder(width, height int, pixelFormat string) (*VP8Encoder, error) {
 	cfg.GW = uint32(width)
 	cfg.GH = uint32(height)
 	cfg.GTimebase = vpx.Rational{Num: 1, Den: 30}
-	cfg.RcTargetBitrate = 1000 // 1 Mbps
+	cfg.RcTargetBitrate = uint32(targetBitrateKbps)
 	cfg.GPass = vpx.RcOnePass
 	cfg.RcEndUsage = vpx.Cbr
 	cfg.KfMode = vpx.KfAuto

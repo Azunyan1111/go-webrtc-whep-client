@@ -14,6 +14,7 @@ var (
 	NoFrameValidation bool
 	NoPacing          bool
 	DropThreshold     int // 遅延フレーム破棄閾値（ミリ秒）
+	VideoBitrateKbps  int // VP8目標ビットレート（kbps）
 	CPUProfilePath    string
 	MemProfilePath    string
 )
@@ -23,6 +24,7 @@ func init() {
 	pflag.BoolVar(&NoFrameValidation, "no-validate", false, "Disable frame validation (show raw packet loss artifacts)")
 	pflag.BoolVar(&NoPacing, "no-pacing", false, "Disable PTS-based pacing (send frames as fast as possible)")
 	pflag.IntVar(&DropThreshold, "drop-threshold", 200, "Drop frames that are more than this many milliseconds late (0 to disable)")
+	pflag.IntVarP(&VideoBitrateKbps, "video-bitrate-kbps", "b", 5000, "VP8 target video bitrate in kbps")
 	pflag.StringVar(&CPUProfilePath, "cpu-profile", "", "Write CPU profile to file (whip-go only)")
 	pflag.StringVar(&MemProfilePath, "mem-profile", "", "Write heap profile to file at exit (whip-go only)")
 }

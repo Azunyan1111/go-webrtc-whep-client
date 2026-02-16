@@ -36,7 +36,7 @@ func testEncode(filename, outputPrefix string) error {
 	fmt.Printf("  Resolution: %dx%d, Format: %s\n", width, height, pixelFormat)
 
 	// Create encoder
-	encoder, err := internal.NewVP8Encoder(width, height, pixelFormat)
+	encoder, err := internal.NewVP8Encoder(width, height, pixelFormat, 1000)
 	if err != nil {
 		return fmt.Errorf("failed to create encoder: %v", err)
 	}
