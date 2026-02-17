@@ -61,14 +61,8 @@ type RawVideoMKVWriter struct {
 	videoTrackNum   uint64
 	audioTrackNum   uint64
 	clusterTime     uint64
-	firstVideoTS    uint32
-	hasFirstVideoTS bool
-	firstAudioTS    uint32
-	hasFirstAudioTS bool
-	videoStartMs    uint64
-	audioStartMs    uint64
-	baseWallTime    time.Time
-	hasBaseWallTime bool
+	videoTimestamp  rtpTimestampUnwrapper
+	audioTimestamp  rtpTimestampUnwrapper
 	mutex           sync.Mutex
 	done            chan struct{}
 	running         chan struct{}
@@ -87,6 +81,29 @@ type ValidationStats struct {
 	RepeatedFrames    int // lastValidFrameを再利用した回数
 	DecodeErrors      int
 	LastInvalidReason string
+}
+
+// rtpTimestampUnwrapper は32bit RTP timestampを64bitの単調増加値へ展開する
+type rtpTimestampUnwrapper struct {
+	initialized bool
+	lastRaw     uint32
+	wrapCount   uint64
+}
+
+func (u *rtpTimestampUnwrapper) Extend(timestamp uint32) uint64 {
+	if !u.initialized {
+		u.initialized = true
+		u.lastRaw = timestamp
+		return uint64(timestamp)
+	}
+
+	// 32bit境界を跨いだ前進のみラップとして扱う
+	if timestamp < u.lastRaw && (u.lastRaw-timestamp) > (1<<31) {
+		u.wrapCount++
+	}
+
+	u.lastRaw = timestamp
+	return (u.wrapCount << 32) | uint64(timestamp)
 }
 
 // NewRawVideoMKVWriter は新しいRawVideoMKVWriterを作成
@@ -137,15 +154,9 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 
 	w.validationStats.TotalFrames++
 
-	// Initialize timestamp on first frame
-	if !w.hasFirstVideoTS {
-		w.firstVideoTS = timestamp
-		w.hasFirstVideoTS = true
-		w.videoStartMs = w.allocateTrackStartOffsetMs(time.Now())
-		// Debug: dump first frame header
-		if len(data) >= 10 {
-			DebugLog("First frame: len=%d, header=%x, keyframe=%v\n", len(data), data[:10], keyframe)
-		}
+	// Debug: dump first frame header
+	if !w.videoTimestamp.initialized && len(data) >= 10 {
+		DebugLog("First frame: len=%d, header=%x, keyframe=%v\n", len(data), data[:10], keyframe)
 	}
 
 	// デコーダーがまだ初期化されていない場合
@@ -155,10 +166,9 @@ func (w *RawVideoMKVWriter) WriteVideoFrame(data []byte, timestamp uint32, keyfr
 		}
 	}
 
-	// Calculate timecode in milliseconds (デコード失敗時の再出力にも必要)
-	// RTP timestampはトラックごとに独立しているため、映像は映像の起点から計算する。
-	relativeTS := uint64(timestamp - w.firstVideoTS)
-	timecodeMs := w.videoStartMs + (relativeTS*1000)/90000 // 90kHz to ms
+	// Calculate timecode in milliseconds
+	// PTSはRTP timestampから直接復元し、time.Now()由来の補正は行わない。
+	timecodeMs := (w.videoTimestamp.Extend(timestamp) * 1000) / 90000 // 90kHz to ms
 
 	// フレームをデコード
 	if err := vpx.Error(vpx.CodecDecode(w.ctx, string(data), uint32(len(data)), nil, 0)); err != nil {
@@ -252,18 +262,6 @@ func (w *RawVideoMKVWriter) repeatLastValidFrame(timecodeMs uint64, reason strin
 	return nil
 }
 
-func (w *RawVideoMKVWriter) allocateTrackStartOffsetMs(now time.Time) uint64 {
-	if !w.hasBaseWallTime {
-		w.baseWallTime = now
-		w.hasBaseWallTime = true
-		return 0
-	}
-	if now.Before(w.baseWallTime) {
-		return 0
-	}
-	return uint64(now.Sub(w.baseWallTime) / time.Millisecond)
-}
-
 // GetValidationStats は検証統計を返す
 func (w *RawVideoMKVWriter) GetValidationStats() ValidationStats {
 	w.mutex.Lock()
@@ -288,17 +286,9 @@ func (w *RawVideoMKVWriter) WriteAudioFrame(data []byte, timestamp uint32) error
 		return nil
 	}
 
-	// Initialize timestamp on first frame
-	if !w.hasFirstAudioTS {
-		w.firstAudioTS = timestamp
-		w.hasFirstAudioTS = true
-		w.audioStartMs = w.allocateTrackStartOffsetMs(time.Now())
-	}
-
 	// Calculate timecode in milliseconds
-	// RTP timestampはトラックごとに独立しているため、音声は音声の起点から計算する。
-	relativeTS := uint64(timestamp - w.firstAudioTS)
-	timecodeMs := w.audioStartMs + (relativeTS*1000)/48000 // 48kHz to ms
+	// PTSはRTP timestampから直接復元し、time.Now()由来の補正は行わない。
+	timecodeMs := (w.audioTimestamp.Extend(timestamp) * 1000) / 48000 // 48kHz to ms
 
 	return w.writeSimpleBlock(w.audioTrackNum, data, timecodeMs, false)
 }

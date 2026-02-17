@@ -147,6 +147,13 @@ type mkvStreamParser struct {
 	inAudio      bool
 }
 
+const (
+	lacingNone  = 0
+	lacingXiph  = 1
+	lacingFixed = 2
+	lacingEBML  = 3
+)
+
 func (r *MKVReader) parse() {
 	defer close(r.frames)
 
@@ -385,8 +392,11 @@ func (p *mkvStreamParser) handleSimpleBlock(data []byte) error {
 	relativeTs := int16(binary.BigEndian.Uint16(data[trackNumSize : trackNumSize+2]))
 	flags := data[trackNumSize+2]
 	isKeyframe := (flags & 0x80) != 0
+	lacingMode := int((flags & 0x06) >> 1)
 	frameData := data[trackNumSize+3:]
-	timestampMs := p.currentClusterTime + int64(relativeTs)
+	clusterTimeMs := p.scaleTicksToMilliseconds(p.currentClusterTime)
+	blockRelativeTsMs := p.scaleTicksToMilliseconds(int64(relativeTs))
+	timestampMs := clusterTimeMs + blockRelativeTsMs
 
 	var frameType FrameType
 	switch int64(trackNum) {
@@ -398,15 +408,299 @@ func (p *mkvStreamParser) handleSimpleBlock(data []byte) error {
 		return nil
 	}
 
-	frame := &Frame{
-		Type:              frameType,
-		Data:              frameData,
-		TimestampMs:       timestampMs,
-		IsKeyframe:        isKeyframe,
-		ClusterTimeMs:     p.currentClusterTime,
-		BlockRelativeTsMs: int64(relativeTs),
+	frames, err := p.parseLacedFrames(frameData, lacingMode)
+	if err != nil {
+		return err
 	}
-	return p.sendFrame(frame)
+	if len(frames) == 0 {
+		return nil
+	}
+
+	runningTsMs := timestampMs
+	for idx, payload := range frames {
+		frame := &Frame{
+			Type:              frameType,
+			Data:              payload,
+			TimestampMs:       runningTsMs,
+			IsKeyframe:        isKeyframe && idx == 0,
+			ClusterTimeMs:     clusterTimeMs,
+			BlockRelativeTsMs: blockRelativeTsMs,
+		}
+		if err := p.sendFrame(frame); err != nil {
+			return err
+		}
+
+		// Opus の lacing は複数パケットを1ブロックへ詰めるため、
+		// 各パケットの想定長に応じて timestamp を進める。
+		if frameType == FrameTypeAudio && p.reader.audioCodec == "A_OPUS" {
+			runningTsMs += estimateOpusPacketDurationMs(payload)
+			continue
+		}
+		if frameType == FrameTypeAudio && p.reader.audioCodec == "A_PCM/INT/LIT" {
+			runningTsMs += p.estimatePCMDurationMs(payload)
+		}
+	}
+	return nil
+}
+
+func (p *mkvStreamParser) scaleTicksToMilliseconds(ticks int64) int64 {
+	if ticks == 0 {
+		return 0
+	}
+	timeScale := p.reader.timescale
+	if timeScale == 0 {
+		timeScale = 1000000
+	}
+	// float64 で演算し、timescale != 1ms の入力でも過剰なオーバーフローを避ける。
+	return int64(float64(ticks) * float64(timeScale) / 1000000.0)
+}
+
+func (p *mkvStreamParser) estimatePCMDurationMs(payload []byte) int64 {
+	if p.reader.audioSampleRate <= 0 || p.reader.audioChannels <= 0 {
+		return 0
+	}
+	bytesPerSample := p.reader.audioChannels * 2 // S16LE
+	if bytesPerSample <= 0 {
+		return 0
+	}
+	samples := len(payload) / bytesPerSample
+	if samples <= 0 {
+		return 0
+	}
+	return int64(samples * 1000 / p.reader.audioSampleRate)
+}
+
+func (p *mkvStreamParser) parseLacedFrames(payload []byte, lacingMode int) ([][]byte, error) {
+	switch lacingMode {
+	case lacingNone:
+		if len(payload) == 0 {
+			return nil, nil
+		}
+		return [][]byte{payload}, nil
+	case lacingXiph:
+		return parseXiphLacing(payload)
+	case lacingFixed:
+		return parseFixedLacing(payload)
+	case lacingEBML:
+		return parseEBMLLacing(payload)
+	default:
+		return nil, fmt.Errorf("unknown lacing mode: %d", lacingMode)
+	}
+}
+
+func parseXiphLacing(payload []byte) ([][]byte, error) {
+	if len(payload) < 1 {
+		return nil, fmt.Errorf("xiph lacing: payload too short")
+	}
+	frameCount := int(payload[0]) + 1
+	if frameCount <= 0 {
+		return nil, fmt.Errorf("xiph lacing: invalid frame count")
+	}
+
+	idx := 1
+	sizes := make([]int, frameCount)
+	totalKnown := 0
+	for i := 0; i < frameCount-1; i++ {
+		size := 0
+		for {
+			if idx >= len(payload) {
+				return nil, fmt.Errorf("xiph lacing: unexpected EOF in size table")
+			}
+			b := int(payload[idx])
+			idx++
+			size += b
+			if b != 255 {
+				break
+			}
+		}
+		sizes[i] = size
+		totalKnown += size
+	}
+
+	if totalKnown > len(payload)-idx {
+		return nil, fmt.Errorf("xiph lacing: size table exceeds payload")
+	}
+	sizes[frameCount-1] = len(payload) - idx - totalKnown
+	return sliceLacedFrames(payload[idx:], sizes)
+}
+
+func parseFixedLacing(payload []byte) ([][]byte, error) {
+	if len(payload) < 1 {
+		return nil, fmt.Errorf("fixed lacing: payload too short")
+	}
+	frameCount := int(payload[0]) + 1
+	if frameCount <= 0 {
+		return nil, fmt.Errorf("fixed lacing: invalid frame count")
+	}
+	data := payload[1:]
+	if frameCount == 0 {
+		return nil, fmt.Errorf("fixed lacing: invalid frame count")
+	}
+	if len(data)%frameCount != 0 {
+		return nil, fmt.Errorf("fixed lacing: payload size %d is not divisible by frame count %d", len(data), frameCount)
+	}
+	frameSize := len(data) / frameCount
+	sizes := make([]int, frameCount)
+	for i := range sizes {
+		sizes[i] = frameSize
+	}
+	return sliceLacedFrames(data, sizes)
+}
+
+func parseEBMLLacing(payload []byte) ([][]byte, error) {
+	if len(payload) < 1 {
+		return nil, fmt.Errorf("ebml lacing: payload too short")
+	}
+	frameCount := int(payload[0]) + 1
+	if frameCount <= 0 {
+		return nil, fmt.Errorf("ebml lacing: invalid frame count")
+	}
+
+	idx := 1
+	firstSizeU64, n, err := readEBMLVint(payload[idx:])
+	if err != nil {
+		return nil, fmt.Errorf("ebml lacing: failed to read first size: %w", err)
+	}
+	idx += n
+	if firstSizeU64 > math.MaxInt32 {
+		return nil, fmt.Errorf("ebml lacing: first size too large: %d", firstSizeU64)
+	}
+
+	sizes := make([]int, frameCount)
+	sizes[0] = int(firstSizeU64)
+	sumSizes := sizes[0]
+	prevSize := int64(sizes[0])
+
+	for i := 1; i < frameCount-1; i++ {
+		diff, readN, diffErr := readEBMLSignedVint(payload[idx:])
+		if diffErr != nil {
+			return nil, fmt.Errorf("ebml lacing: failed to read size diff: %w", diffErr)
+		}
+		idx += readN
+
+		size := prevSize + diff
+		if size < 0 || size > math.MaxInt32 {
+			return nil, fmt.Errorf("ebml lacing: invalid lace size: %d", size)
+		}
+		sizes[i] = int(size)
+		sumSizes += sizes[i]
+		prevSize = size
+	}
+
+	if sumSizes > len(payload)-idx {
+		return nil, fmt.Errorf("ebml lacing: lace sizes exceed payload")
+	}
+	sizes[frameCount-1] = len(payload) - idx - sumSizes
+	return sliceLacedFrames(payload[idx:], sizes)
+}
+
+func sliceLacedFrames(data []byte, sizes []int) ([][]byte, error) {
+	offset := 0
+	out := make([][]byte, 0, len(sizes))
+	for _, size := range sizes {
+		if size < 0 || offset+size > len(data) {
+			return nil, fmt.Errorf("invalid laced frame size: %d", size)
+		}
+		out = append(out, data[offset:offset+size])
+		offset += size
+	}
+	if offset != len(data) {
+		return nil, fmt.Errorf("laced frame payload mismatch: consumed=%d total=%d", offset, len(data))
+	}
+	return out, nil
+}
+
+func readEBMLVint(data []byte) (uint64, int, error) {
+	if len(data) == 0 {
+		return 0, 0, io.ErrUnexpectedEOF
+	}
+	first := data[0]
+	length := 1
+	mask := byte(0x80)
+	for length <= 8 && (first&mask) == 0 {
+		mask >>= 1
+		length++
+	}
+	if length > 8 || len(data) < length {
+		return 0, 0, fmt.Errorf("invalid EBML vint")
+	}
+
+	value := uint64(first & (mask - 1))
+	for i := 1; i < length; i++ {
+		value = (value << 8) | uint64(data[i])
+	}
+	return value, length, nil
+}
+
+func readEBMLSignedVint(data []byte) (int64, int, error) {
+	value, n, err := readEBMLVint(data)
+	if err != nil {
+		return 0, 0, err
+	}
+	length := n
+	bias := int64((uint64(1) << uint(length*7-1)) - 1)
+	return int64(value) - bias, n, nil
+}
+
+func estimateOpusPacketDurationMs(payload []byte) int64 {
+	if len(payload) == 0 {
+		return 0
+	}
+
+	toc := payload[0]
+	config := toc >> 3
+	frameCode := toc & 0x03
+
+	frameCount := 1
+	switch frameCode {
+	case 0:
+		frameCount = 1
+	case 1, 2:
+		frameCount = 2
+	case 3:
+		if len(payload) < 2 {
+			return 0
+		}
+		frameCount = int(payload[1] & 0x3F)
+		if frameCount < 1 {
+			frameCount = 1
+		}
+	}
+
+	frameDurationUs := int64(20000)
+	switch {
+	case config < 12:
+		switch config & 0x03 {
+		case 0:
+			frameDurationUs = 10000
+		case 1:
+			frameDurationUs = 20000
+		case 2:
+			frameDurationUs = 40000
+		case 3:
+			frameDurationUs = 60000
+		}
+	case config < 16:
+		if config&0x01 == 0 {
+			frameDurationUs = 10000
+		} else {
+			frameDurationUs = 20000
+		}
+	default:
+		switch config & 0x03 {
+		case 0:
+			frameDurationUs = 2500
+		case 1:
+			frameDurationUs = 5000
+		case 2:
+			frameDurationUs = 10000
+		case 3:
+			frameDurationUs = 20000
+		}
+	}
+
+	totalUs := frameDurationUs * int64(frameCount)
+	return totalUs / 1000
 }
 
 func (p *mkvStreamParser) sendFrame(frame *Frame) error {

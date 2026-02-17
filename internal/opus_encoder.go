@@ -22,6 +22,7 @@ type OpusEncoder struct {
 	hasBufferStartTS    bool
 	lastClusterTimeMs   int64
 	hasLastClusterTime  bool
+	clusterUpdateCount  int64
 	encodedFrameCounter int64
 }
 
@@ -58,6 +59,7 @@ func NewOpusEncoder(sampleRate, channels int) (*OpusEncoder, error) {
 		hasBufferStartTS:    false,
 		lastClusterTimeMs:   0,
 		hasLastClusterTime:  false,
+		clusterUpdateCount:  0,
 		encodedFrameCounter: 0,
 	}, nil
 }
@@ -83,8 +85,12 @@ func (e *OpusEncoder) Encode(pcm []byte, inputTimestampMs int64, clusterTimeMs i
 		}
 		e.lastClusterTimeMs = clusterTimeMs
 		e.hasLastClusterTime = true
-		DebugLog("Opus encoder cluster anchor updated: cluster=%dms input=%dms buffer_start=%dms\n",
-			clusterTimeMs, inputTimestampMs, e.bufferStartTSMs)
+		e.clusterUpdateCount++
+		// ログ過多を防ぐため、クラスタ更新ログは初回と30回ごとに限定する。
+		if e.clusterUpdateCount == 1 || e.clusterUpdateCount%30 == 0 {
+			DebugLog("Opus encoder cluster anchor updated: cluster=%dms input=%dms buffer_start=%dms updates=%d\n",
+				clusterTimeMs, inputTimestampMs, e.bufferStartTSMs, e.clusterUpdateCount)
+		}
 	} else if len(e.pcmBuffer) == 0 {
 		// バッファが空の場合は入力PTSをそのまま次のアンカーにする。
 		e.bufferStartTSMs = inputTimestampMs
